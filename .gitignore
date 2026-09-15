@@ -1,0 +1,10 @@
+.env
+output/
+browser_profile/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+.vscode/
+.idea/
