@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS room_types (
     UNIQUE (hotel_id, trip_room_id)
 );
 
--- Time-series giá. Chỉ dùng nếu anh Thắng chốt là cần giá theo ngày.
+-- Time-series giá. Chỉ dùng nếu anh Vũ chốt là cần giá theo ngày.
 CREATE TABLE IF NOT EXISTS hotel_prices (
     id            BIGSERIAL PRIMARY KEY,
     hotel_id      BIGINT NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,

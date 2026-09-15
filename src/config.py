@@ -74,7 +74,7 @@ RESPECT_ROBOTS = os.getenv("RESPECT_ROBOTS", "true").lower() == "true"
 
 # ---------------------------------------------------------------- thành phố VN
 # ID thật lấy từ response getCityList lúc recon — xem output/recon/bodies/008_*.
-# Thêm/bớt tuỳ phạm vi anh Thắng chốt ở Giai đoạn 0.
+# Thêm/bớt tuỳ phạm vi anh Vũ chốt ở Giai đoạn 0.
 VN_CITIES: list[dict] = [
     {"id": 301, "name": "TP. Hồ Chí Minh"},
     {"id": 286, "name": "Hà Nội"},

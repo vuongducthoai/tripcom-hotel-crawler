@@ -1,7 +1,7 @@
 # Recon Trip.com — kết luận
 
 > Điền file này SAU khi chạy `python src/recon.py`.
-> Đây là căn cứ để chọn đường A hay đường B, và là thứ anh Thắng sẽ đọc.
+> Đây là căn cứ để chọn đường A hay đường B, và là thứ anh Vũ sẽ đọc.
 
 ## 1. Trang đã khảo sát
 
@@ -16,7 +16,7 @@
 - URL: https://vn.trip.com/robots.txt
 - Đường dẫn khách sạn có bị `Disallow` không:
 - Có `Crawl-delay` không:
-- **Đã hỏi anh Thắng chưa:** chưa / rồi — kết luận:
+- **Đã hỏi anh Vũ chưa:** chưa / rồi — kết luận:
 
 ## 3. Có API JSON không?
 

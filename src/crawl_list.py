@@ -66,7 +66,7 @@ async def fetch_html(url: str) -> str:
         if result.status_code == 403 and "robots" in msg.lower():
             raise SystemExit(
                 "Bị robots.txt chặn.\n"
-                "Đây là quyết định của công ty, không phải của anh: hỏi anh Thắng\n"
+                "Đây là quyết định của công ty, không phải của anh: hỏi anh Vũ\n"
                 "trước khi đặt RESPECT_ROBOTS=false trong .env."
             )
         raise SystemExit(f"Crawl thất bại: {msg}")

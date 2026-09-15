@@ -3,7 +3,7 @@
 Crawl dữ liệu khách sạn từ Trip.com về PostgreSQL.
 
 - **Người thực hiện:** Vương Đức Thoại, Trịnh Quang Anh (S.AI20K)
-- **Nghiệm thu:** Đặng Nguyễn Quyết Thắng (VSF-KD&VH DLKS-PMKD)
+- **Nghiệm thu:** Nguyễn Thạch Vũ (VSF-KD&VH DLKS-PMKD)
 
 ## Ý tưởng
 
@@ -182,7 +182,7 @@ src/http_client.py, src/crawl_list.py, src/hotel_selectors.py, src/extract.py
   Trang, Đà Lạt, Phan Thiết, Phú Quốc): **chưa crawl**.
 - **Trang "Khách sạn giá rẻ"** (1 trong 2 trang được giao ban đầu): pipeline
   hiện tại tự động hoá trang danh sách chung theo thành phố, **chưa cào
-  riêng trang giá rẻ** — cần xác nhận với anh Thắng đây có phải yêu cầu
+  riêng trang giá rẻ** — cần xác nhận với anh Vũ đây có phải yêu cầu
   bắt buộc không hay dùng cờ `is_cheap_listing` suy ra từ giá là đủ.
 - **Trang chi tiết** (ảnh đầy đủ, tiện ích, loại phòng): đang crawl, tự
   checkpoint, chạy nền qua nhiều giờ do tốc độ cố ý chậm (né chặn).
@@ -192,7 +192,7 @@ src/http_client.py, src/crawl_list.py, src/hotel_selectors.py, src/extract.py
 - **Giá theo ngày** (`hotel_prices`): lấy giá rẻ nhất của từng loại
   phòng trong `getHotelRoomListOversea`; mỗi phòng/ngày crawl là một snapshot.
 
-## Lưu ý pháp lý — cần anh Thắng xác nhận trước khi mở rộng quy mô
+## Lưu ý pháp lý — cần anh Vũ xác nhận trước khi mở rộng quy mô
 
 Đã kiểm tra trực tiếp `robots.txt` của Trip.com (`vn.trip.com/robots.txt`) —
 **cấm rõ ràng đúng các đường dẫn mình đang cào**:
@@ -209,6 +209,6 @@ hình, chưa có code nào thật sự kiểm tra/chặn theo nó** — nghĩa l
 phải vi phạm hình sự (dữ liệu cào là dữ liệu công khai, không cần đăng
 nhập), nhưng nhiều khả năng vi phạm Điều khoản sử dụng của Trip.com —
 rủi ro thực tế là bị chặn IP/tài khoản, không phải rủi ro pháp lý hình sự.
-**Cần anh Thắng biết và quyết định trước khi mở rộng lên 6 thành phố còn
+**Cần anh Vũ biết và quyết định trước khi mở rộng lên 6 thành phố còn
 lại** — không tự ý tắt/bật cờ này mà không hỏi. Dữ liệu chỉ dùng nội bộ để
 dựng hệ thống, không redistribute/bán lại.
