@@ -167,6 +167,72 @@ def extract_from_html(html: str, city_name: str | None = None) -> tuple[list[dic
     }
 
 
+def extract_next_object(html: str, key: str) -> dict | None:
+    """Lấy một object có tên từ Next.js flight data.
+
+    Một số phiên Trip.com không SSR danh sách nữa (``initListData`` rỗng)
+    nhưng vẫn nhúng toàn bộ body gọi API trong ``initListRequest``.
+    """
+    text = _next_f_text(html)
+    marker = json.dumps(key) + ":"
+    i = text.find(marker)
+    if i < 0:
+        return None
+    start = text.find("{", i + len(marker))
+    if start < 0:
+        return None
+    blob = _balanced_object(text, start)
+    if not blob:
+        return None
+    try:
+        value = json.loads(blob)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def extract_filter_options(html: str, filter_type: str) -> list[dict]:
+    """Lấy các lựa chọn filter thật mà trang SSR trả về.
+
+    Flight data của Next.js không phải một JSON duy nhất, nhưng mỗi node filter
+    vẫn chứa một object ``data`` JSON hợp lệ. Đọc trực tiếp các node này giúp
+    crawler không phải đoán ``value``/``filterId`` (đặc biệt type 15 là khoảng
+    giá, value có dạng ``0|500000`` chứ không phải chỉ ``1``).
+    """
+    text = _next_f_text(html)
+    marker = f'"type":"{filter_type}"'
+    options: dict[str, dict] = {}
+    pos = 0
+
+    while True:
+        pos = text.find(marker, pos)
+        if pos < 0:
+            break
+        wrapper = text.rfind('{"data":', max(0, pos - 1200), pos)
+        if wrapper >= 0:
+            start = text.find("{", wrapper + len('{"data":'))
+            blob = _balanced_object(text, start) if start >= 0 else None
+            if blob:
+                try:
+                    data = json.loads(blob)
+                except Exception:
+                    data = None
+                if isinstance(data, dict) and str(data.get("type")) == filter_type:
+                    fid = data.get("filterID") or data.get("filterId")
+                    value = data.get("value")
+                    if fid and value is not None:
+                        options[str(fid)] = {
+                            "type": filter_type,
+                            "value": str(value),
+                            "filterId": str(fid),
+                            "title": data.get("title") or "",
+                            "subType": str(data.get("subType") or ""),
+                        }
+        pos += len(marker)
+
+    return list(options.values())
+
+
 # --------------------------------------------------------- dò nguồn chưa biết
 def find_hotel_lists(obj, path: str = "") -> list[tuple[str, list]]:
     """Quét sâu một JSON bất kỳ, tìm mảng chứa khách sạn.

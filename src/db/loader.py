@@ -16,15 +16,18 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
 
 import config
+from db.location_upsert import upsert_city
 
 UPSERT = """
 INSERT INTO hotels (
-    trip_hotel_id, name, name_en, url, address, latitude, longitude,
+    trip_hotel_id, name, name_en, url, location_id, address, latitude, longitude,
     star_rating, review_score, review_count,
     price_from, currency, is_cheap_listing, source_url, raw_json, last_seen_at
 )
@@ -33,6 +36,7 @@ ON CONFLICT (trip_hotel_id) DO UPDATE SET
     name             = COALESCE(EXCLUDED.name, hotels.name),
     name_en          = COALESCE(EXCLUDED.name_en, hotels.name_en),
     url              = COALESCE(EXCLUDED.url, hotels.url),
+    location_id      = COALESCE(EXCLUDED.location_id, hotels.location_id),
     address          = COALESCE(EXCLUDED.address, hotels.address),
     latitude         = COALESCE(EXCLUDED.latitude, hotels.latitude),
     longitude        = COALESCE(EXCLUDED.longitude, hotels.longitude),
@@ -43,7 +47,11 @@ ON CONFLICT (trip_hotel_id) DO UPDATE SET
     -- cờ cheap chỉ bật thêm, không tự tắt khi crawl trang khác
     is_cheap_listing = hotels.is_cheap_listing OR EXCLUDED.is_cheap_listing,
     source_url       = EXCLUDED.source_url,
-    raw_json         = EXCLUDED.raw_json,
+    -- Import overview again without discarding detail already loaded.
+    raw_json         = EXCLUDED.raw_json ||
+                       CASE WHEN hotels.raw_json ? 'detail'
+                            THEN jsonb_build_object('detail', hotels.raw_json->'detail')
+                            ELSE '{}'::jsonb END,
     last_seen_at     = now();
 """
 
@@ -80,38 +88,42 @@ def main(args: argparse.Namespace) -> None:
     payload = json.loads(path.read_text(encoding="utf-8"))
     hotels = payload.get("hotels", [])
     source = payload.get("source_url") or payload.get("city_name") or path.name
+    city_name = payload.get("city_name")
+    city_id = payload.get("city_id")
     is_cheap = args.cheap or "cheap" in source.lower()
 
-    rows, skipped = [], 0
-    for h in hotels:
-        hid = h.get("trip_hotel_id")
-        if not hid:
-            skipped += 1
-            continue
-        rows.append(
-            (
-                hid,
-                h.get("name"),
-                h.get("name_en"),
-                h.get("url"),
-                h.get("address"),
-                h.get("latitude"),
-                h.get("longitude"),
-                h.get("star_rating"),
-                as_score(h.get("review_score") if h.get("review_score") is not None else h.get("score")),
-                h.get("review_count"),
-                h.get("price_value"),
-                h.get("currency") or "VND",
-                is_cheap,
-                source,
-                Json(h),
-            )
-        )
-
-    if not rows:
-        raise SystemExit(f"Không có bản ghi nào có trip_hotel_id trong {path.name}.")
-
     with psycopg2.connect(config.dsn()) as conn, conn.cursor() as cur:
+        location_id = upsert_city(cur, city_name, city_id)
+        rows, skipped = [], 0
+        for h in hotels:
+            hid = h.get("trip_hotel_id")
+            if not hid:
+                skipped += 1
+                continue
+            rows.append(
+                (
+                    hid,
+                    h.get("name"),
+                    h.get("name_en"),
+                    h.get("url"),
+                    location_id or upsert_city(cur, h.get("city_name")),
+                    h.get("address"),
+                    h.get("latitude"),
+                    h.get("longitude"),
+                    h.get("star_rating"),
+                    as_score(h.get("review_score") if h.get("review_score") is not None else h.get("score")),
+                    h.get("review_count"),
+                    h.get("price_value"),
+                    h.get("currency") or "VND",
+                    is_cheap,
+                    source,
+                    Json(h),
+                )
+            )
+
+        if not rows:
+            raise SystemExit(f"Không có bản ghi nào có trip_hotel_id trong {path.name}.")
+
         cur.execute(
             "INSERT INTO crawl_runs (target, status) VALUES (%s, 'running') RETURNING id",
             (source,),
@@ -119,11 +131,12 @@ def main(args: argparse.Namespace) -> None:
         run_id = cur.fetchone()[0]
         execute_values(
             cur, UPSERT, rows,
-            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
+            template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
         )
         cur.execute(
             "UPDATE crawl_runs SET status='success', finished_at=now(), stats=%s WHERE id=%s",
-            (Json({"file": path.name, "upserted": len(rows), "skipped": skipped}), run_id),
+            (Json({"file": path.name, "upserted": len(rows), "skipped": skipped,
+                   "location_id": location_id}), run_id),
         )
         cur.execute("SELECT count(*) FROM hotels")
         total = cur.fetchone()[0]

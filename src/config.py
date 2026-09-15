@@ -61,13 +61,14 @@ CHECKPOINT_EVERY = int(os.getenv("CHECKPOINT_EVERY", "20"))
 # có nhiều hơn (vd TP.HCM báo 6545 nhưng crawl thẳng chỉ ra 3047). Đặt thấp
 # hơn một chút (2800) cho an toàn — xem docs/recon.md mục "chặn mềm 3000".
 PARTITION_CAP = int(os.getenv("PARTITION_CAP", "2800"))
-# 2 trục đã xác nhận CÓ tác dụng qua probe_filters.py (loại 16, 23 — có vẻ
-# là nhãn/tag chứ không phải phân loại tách biệt, các nhánh có thể chồng
-# lên nhau — không sao vì kết quả cuối cùng luôn dedupe theo trip_hotel_id).
-# Loại 17 (sắp xếp), 80 (giá), 15 bị server bỏ qua — đã kiểm chứng, không dùng.
-PARTITION_AXES = ["16", "23"]
-PARTITION_AXIS_VALUES = range(0, 8)   # dò rộng hơn số liệu quan sát (0-5) cho an toàn
-PARTITION_MAX_LEAVES = 60             # chặn bùng nổ tổ hợp nếu thành phố quá lớn
+# Qua chạy thực tế, truy vấn đã gắn filter có cửa sổ nhỏ hơn: khoảng 800
+# hotel dù hotelTotalCount báo cao hơn. Mỗi lá phải thấp hơn mức này.
+FILTERED_PARTITION_CAP = int(os.getenv("FILTERED_PARTITION_CAP", "700"))
+# Crawler đọc các khoảng giá type 15 thật từ SSR rồi chia tiếp khoảng nào
+# vẫn vượt cap. Không dùng type 16/23: đó là tag chồng lấn, không bao phủ
+# toàn bộ thành phố dù từng mảnh vẫn phân trang tới isLastPage.
+PARTITION_MAX_LEAVES = 160            # giá × sao × loại chỗ nghỉ khi cần
+MIN_COMPLETE_RATIO = float(os.getenv("MIN_COMPLETE_RATIO", "0.98"))
 
 RESPECT_ROBOTS = os.getenv("RESPECT_ROBOTS", "true").lower() == "true"
 

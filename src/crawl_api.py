@@ -11,14 +11,10 @@ Lịch sử điều tra (xem docs/recon.md):
     (kèm token chống bot do chính trang sinh ra), rồi phát lại request đó
     ngay TRONG trang, tăng dần pageIndex.
   - Trip.com còn CHẶN MỀM ở khoảng 3000 KS mỗi truy vấn — thành phố lớn hơn
-    (TP.HCM ~6500-7000) sẽ bị cắt giữa chừng dù gọi đúng API. Xác nhận qua
-    probe_filters.py: 2 loại filter "16" và "23" server có áp dụng thật (số
-    lượng đổi), còn "17" (sắp xếp), "80" (giá), "15" bị bỏ qua. Hai loại này
-    có vẻ là nhãn/tag (nhánh có thể CHỒNG LÊN NHAU, tổng > tổng gốc) chứ
-    không phải phân loại tách biệt — không sao, vì kết quả luôn dedupe theo
-    trip_hotel_id nên chồng lấn chỉ tốn thêm request, không gây sai lệch.
-    → Khi 1 thành phố vượt PARTITION_CAP (config.py), tự động chia truy vấn
-    theo "16" rồi "23" (đệ quy), mỗi mảnh dưới ngưỡng mới thật sự crawl.
+    (TP.HCM ~6500-7000) sẽ bị cắt giữa chừng dù gọi đúng API. Crawler đọc
+    các bucket giá type 15 thật từ HTML (0 tới max), rồi tự chia đôi bucket
+    nào còn vượt PARTITION_CAP. Không dùng type 16/23 vì đó là tag chồng lấn,
+    không tạo thành một phép chia bao phủ toàn bộ thành phố.
 
     python src/crawl_api.py                       # chạy hết VN_CITIES
     python src/crawl_api.py --city-id 301
@@ -46,11 +42,22 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 
 import config
-from api_extract import dedupe, extract_from_html, find_hotel_lists, is_last_page, parse_hotel
+from api_extract import (
+    dedupe,
+    extract_filter_options,
+    extract_from_html,
+    extract_next_object,
+    find_hotel_lists,
+    is_last_page,
+    parse_hotel,
+)
 
 NOISE = re.compile(r"(google|gstatic|doubleclick|facebook|sentry|/log|/track|bee/collect)", re.I)
 HOTEL_SERVICE = "/restapi/soa2/34951/"
 LIST_ENDPOINT = "fetchHotelList"
+RECOMMEND_ENDPOINT = "fetchRecommendList"
+LIST_ENDPOINTS = (LIST_ENDPOINT, RECOMMEND_ENDPOINT)
+LIST_URL = f"https://vn.trip.com{HOTEL_SERVICE}{LIST_ENDPOINT}"
 
 # fetch() của trình duyệt tự quản lý các header này, truyền vào sẽ bị bỏ
 # qua hoặc báo lỗi — phải lọc ra khỏi mẫu bắt được.
@@ -117,7 +124,18 @@ class HotelCollector:
             self._dump_once(req, body)
 
         # Bắt mẫu request phân trang — chỉ cần 1 lần, có token là dùng lại được.
-        if LIST_ENDPOINT in req.url and self.template is None and req.post_data:
+        endpoint_path = req.url.split("?", 1)[0]
+        endpoint_name = next(
+            (name for name in LIST_ENDPOINTS if endpoint_path.endswith(f"/{name}")),
+            None,
+        )
+        is_list = endpoint_name is not None
+        current_name = (self.template or {}).get("endpoint")
+        prefer_template = (
+            self.template is None
+            or (endpoint_name == LIST_ENDPOINT and current_name != LIST_ENDPOINT)
+        )
+        if is_list and prefer_template and req.post_data:
             try:
                 headers = await req.all_headers()
             except Exception:
@@ -129,6 +147,7 @@ class HotelCollector:
                     if not k.startswith(":") and k.lower() not in FORBIDDEN_HEADERS
                 },
                 "post_data": req.post_data,
+                "endpoint": endpoint_name,
             }
 
         hits = find_hotel_lists(body)
@@ -146,7 +165,7 @@ class HotelCollector:
 
         # CHỈ tin isLastPage từ đúng endpoint danh sách. Trước đây tin cả
         # response khác nên dừng oan ở 49 KS trong khi thành phố có 6546.
-        if LIST_ENDPOINT in req.url and is_last_page(body):
+        if is_list and is_last_page(body):
             self.last_page_seen = True
 
     def _dump_once(self, req, body) -> None:
@@ -206,53 +225,159 @@ async def probe_count(page, tpl: dict, base_filters: list[dict], extra: list[dic
         {"url": tpl["url"], "headers": tpl["headers"], "body": json.dumps(body, ensure_ascii=False)},
     )
     if res["status"] != 200:
+        print(f"    ! Probe {_fmt_extra(extra)}: HTTP {res['status']} — {res['text'][:300]}")
         return None
     try:
         payload = json.loads(res["text"])
     except Exception:
+        print(f"    ! Probe {_fmt_extra(extra)}: response không phải JSON — {res['text'][:300]}")
         return None
-    return ((payload.get("data") or {}).get("hotelListAddtionInfo") or {}).get("hotelTotalCount")
+    count = ((payload.get("data") or {}).get("hotelListAddtionInfo") or {}).get("hotelTotalCount")
+    if count is None:
+        print(f"    ! Probe {_fmt_extra(extra)} không có hotelTotalCount; "
+              f"top-level keys={list(payload)[:10]}")
+    return count
+
+
+def _price_bounds(price_filter: dict) -> tuple[int, int | None] | None:
+    """Đọc value type 15: ``min|max``; None ở cận trên nghĩa là vô hạn."""
+    parts = str(price_filter.get("value", "")).split("|")
+    if len(parts) != 2:
+        return None
+    try:
+        lo = int(parts[0])
+        hi = None if parts[1] == "max" else int(parts[1])
+    except ValueError:
+        return None
+    return lo, hi
+
+
+def _custom_price_filter(lo: int, hi: int | None) -> dict:
+    upper = "max" if hi is None else str(hi)
+    return {
+        "type": "15", "value": f"{lo}|{upper}",
+        "filterId": "15|Range", "subType": "2",
+    }
+
+
+async def _split_price_leaf(
+    page, tpl: dict, base_filters: list[dict], price_filter: dict,
+    count: int, budget: list[int], property_types: list[dict], depth: int = 0,
+) -> list[tuple[list[dict], int]]:
+    """Chia đôi một khoảng giá cho tới khi nằm dưới ngưỡng chặn mềm."""
+    if count <= config.FILTERED_PARTITION_CAP or depth >= 8 or budget[0] < 2:
+        return [([price_filter], count)]
+
+    bounds = _price_bounds(price_filter)
+    if not bounds:
+        return [([price_filter], count)]
+    lo, hi = bounds
+    midpoint = (lo + hi) // 2 if hi is not None else max(lo + 1_000_000, lo * 2)
+    # Làm tròn để request dễ đọc và tránh hai cận trùng nhau.
+    midpoint = max(lo + 1, (midpoint // 50_000) * 50_000)
+    children = [_custom_price_filter(lo, midpoint), _custom_price_filter(midpoint, hi)]
+    counts = []
+    for child in children:
+        cnt = await probe_count(page, tpl, base_filters, [child])
+        counts.append(cnt)
+        await asyncio.sleep(config.API_MIN_DELAY / 2)
+
+    # Server bỏ qua custom range hoặc trả số bất thường: giữ mảnh cha và báo
+    # chưa hoàn chỉnh thay vì giả vờ đã chia thành công.
+    if any(not c for c in counts) or any(c >= count * 0.97 for c in counts):
+        print(f"    ⚠ Custom range không cắt được {_fmt_extra([price_filter])}; "
+              "thử chia tiếp theo hạng sao.")
+        star_leaves: list[tuple[list[dict], int]] = []
+        for star in (2, 3, 4, 5):
+            star_filter = {
+                "type": "16", "value": str(star),
+                "filterId": f"16|{star}", "subType": "2",
+            }
+            extra = [price_filter, star_filter]
+            cnt = await probe_count(page, tpl, base_filters, extra)
+            await asyncio.sleep(config.API_MIN_DELAY / 2)
+            if cnt and cnt < count * 0.97:
+                budget[0] -= 1
+                if cnt > config.FILTERED_PARTITION_CAP:
+                    star_leaves.extend(await _split_by_property_type(
+                        page, tpl, base_filters, extra, cnt,
+                        property_types, budget,
+                    ))
+                else:
+                    star_leaves.append((extra, cnt))
+        # Các mức sao hợp lệ là <=2, 3, 4, 5. Chỉ dùng khi tổng nhánh đủ gần
+        # mảnh cha; nếu không, crawl mảnh cha còn an toàn hơn việc bỏ sót.
+        if star_leaves and sum(c for _, c in star_leaves) >= count * 0.80:
+            return star_leaves
+        print(f"    ⚠ Hạng sao cũng không phủ đủ; giữ nguyên {_fmt_extra([price_filter])}.")
+        return [([price_filter], count)]
+
+    leaves: list[tuple[list[dict], int]] = []
+    for child, child_count in zip(children, counts):
+        budget[0] -= 1
+        leaves.extend(await _split_price_leaf(
+            page, tpl, base_filters, child, child_count, budget,
+            property_types, depth + 1
+        ))
+    return leaves
+
+
+async def _split_by_property_type(
+    page, tpl: dict, base_filters: list[dict], parent_extra: list[dict],
+    parent_count: int, property_types: list[dict], budget: list[int],
+) -> list[tuple[list[dict], int]]:
+    """Tầng chia cuối theo loại chỗ nghỉ type 75 lấy trực tiếp từ SSR."""
+    if budget[0] <= 0 or not property_types:
+        return [(parent_extra, parent_count)]
+
+    leaves: list[tuple[list[dict], int]] = []
+    for property_filter in property_types:
+        if budget[0] <= 0:
+            break
+        extra = parent_extra + [property_filter]
+        cnt = await probe_count(page, tpl, base_filters, extra)
+        await asyncio.sleep(config.API_MIN_DELAY / 2)
+        if not cnt or cnt >= parent_count * 0.97:
+            continue
+        budget[0] -= 1
+        leaves.append((extra, cnt))
+
+    # Type 75 gồm khách sạn, căn hộ, resort, homestay, hostel... Nếu tổng
+    # quá thấp thì taxonomy của phiên hiện tại không đầy đủ, không dùng nó.
+    if leaves and sum(c for _, c in leaves) >= parent_count * 0.80:
+        return leaves
+    return [(parent_extra, parent_count)]
 
 
 async def build_partition(
     page, tpl: dict, base_filters: list[dict],
-    parent_extra: list[dict], parent_count: int, axis_i: int = 0,
-    budget: list[int] | None = None,
+    price_options: list[dict], property_types: list[dict], parent_count: int,
 ) -> list[tuple[list[dict], int]]:
-    """Chia đệ quy theo config.PARTITION_AXES tới khi mỗi mảnh <= PARTITION_CAP.
+    """Lập các mảnh theo khoảng giá thật lấy từ SSR của Trip.com.
 
-    Trả về list (extra_filters, tổng_ước_lượng) — mỗi phần tử là 1 truy vấn
-    sẽ chạy paginate() riêng. Giá trị không thật sự lọc được (server trả về
-    ~bằng mảnh cha) tự động bị bỏ qua, khỏi tạo request thừa.
+    Các khoảng giá type 15 là các bucket rời nhau và bao phủ từ 0 tới max.
+    Cách cũ dùng sao/type 16 và chính sách/type 23; đó là tag chồng lấn nên
+    kết quả có thể dừng đúng từng mảnh nhưng chỉ phủ khoảng một nửa thành phố.
     """
-    if budget is None:
-        budget = [config.PARTITION_MAX_LEAVES]
-
-    if parent_count is None or parent_count <= config.PARTITION_CAP or axis_i >= len(config.PARTITION_AXES):
-        return [(parent_extra, parent_count)]
-
-    ftype = config.PARTITION_AXES[axis_i]
+    presets = [
+        p for p in price_options
+        if re.fullmatch(r"15\|(?:\d+|max)", p.get("filterId", ""))
+        and _price_bounds(p)
+    ]
+    presets.sort(key=lambda p: _price_bounds(p)[0])
+    budget = [config.PARTITION_MAX_LEAVES]
     leaves: list[tuple[list[dict], int]] = []
-    for v in config.PARTITION_AXIS_VALUES:
-        if budget[0] <= 0:
-            print(f"    ⚠ Chạm giới hạn {config.PARTITION_MAX_LEAVES} mảnh — dừng chia thêm, "
-                  f"có thể thiếu sót ở '{_fmt_extra(parent_extra)}'.")
-            break
-        extra = parent_extra + [{"type": ftype, "value": str(v), "filterId": f"{ftype}|{v}"}]
-        cnt = await probe_count(page, tpl, base_filters, extra)
+
+    for price_filter in presets:
+        cnt = await probe_count(page, tpl, base_filters, [price_filter])
         await asyncio.sleep(config.API_MIN_DELAY / 2)
-        if not cnt:
-            continue
-        # Giá trị "không lọc thật" (server bỏ qua) → gần bằng mảnh cha, bỏ.
-        if cnt >= parent_count * 0.97:
+        if not cnt or cnt >= parent_count * 0.97:
             continue
         budget[0] -= 1
-        leaves.extend(await build_partition(page, tpl, base_filters, extra, cnt, axis_i + 1, budget))
+        leaves.extend(await _split_price_leaf(
+            page, tpl, base_filters, price_filter, cnt, budget, property_types
+        ))
 
-    if not leaves:
-        # Trục này không cắt được gì (mọi giá trị đều bị bỏ qua) — đành nhận
-        # nguyên mảnh cha, chấp nhận có thể thiếu sót ở phần vượt ngưỡng.
-        return [(parent_extra, parent_count)]
     return leaves
 
 
@@ -298,7 +423,10 @@ async def paginate(
 
     if seen is None:
         seen = {r["trip_hotel_id"] for r in collector.rows}
-    leaf_start = len(seen)   # để tính riêng số MỚI của mảnh này, không lẫn seen toàn cục
+    # Chỉ gửi ID đã thấy trong chính mảnh hiện tại. Gửi ID của mọi mảnh trước
+    # làm hotelAldyShown khiến trạng thái phân trang phía server bị nhiễu.
+    leaf_seen_ids: list[str] = []
+    leaf_seen_set: set[str] = set()
     empty_streak = 0
     size_fallback_done = False
     label = _fmt_extra(extra_filters)
@@ -306,12 +434,14 @@ async def paginate(
     print(f"  • {label}: gọi API phân trang (pageSize={config.API_PAGE_SIZE}, "
           f"tối đa {max_pages} trang)…")
 
-    for n in range(1, max_pages + 1):
+    n = 0
+    while n < max_pages:
+        n += 1
         page_index += 1
         paging["pageIndex"] = page_index
-        # Server dùng danh sách này để khỏi trả lại KS đã hiện. Giữ ~300 id
-        # gần nhất: đủ để không lặp, mà body không phình tới vài trăm KB.
-        body.setdefault("hotelIdFilter", {})["hotelAldyShown"] = list(seen)[-300:]
+        # Server dùng TOÀN BỘ danh sách này để loại các card đã trả. Chỉ giữ
+        # 300 ID làm server quay vòng kết quả sau khoảng 800 khách sạn.
+        body.setdefault("hotelIdFilter", {})["hotelAldyShown"] = leaf_seen_ids
 
         res = await page.evaluate(
             PAGE_FETCH_JS,
@@ -335,10 +465,18 @@ async def paginate(
 
         entries = ((payload.get("data") or {}).get("hotelList")) or []
         new = 0
+        leaf_new = 0
         for entry in entries:
             row = parse_hotel(entry, city["name"])
-            if row and row["trip_hotel_id"] not in seen:
-                seen.add(row["trip_hotel_id"])
+            if not row:
+                continue
+            hid = row["trip_hotel_id"]
+            if hid not in leaf_seen_set:
+                leaf_seen_set.add(hid)
+                leaf_seen_ids.append(hid)
+                leaf_new += 1
+            if hid not in seen:
+                seen.add(hid)
                 collector.rows.append(row)
                 new += 1
 
@@ -349,24 +487,32 @@ async def paginate(
             size_fallback_done = True
             paging["pageSize"] = orig_size
             page_index -= 1
+            n -= 1  # đổi pageSize không làm mất một trang trong --max-pages
             print(f"    · pageSize={config.API_PAGE_SIZE} không có kết quả, "
                   f"lùi về {orig_size} và thử lại.")
             continue
 
-        leaf_seen = len(seen) - leaf_start   # số duy nhất mảnh NÀY đã góp, không lẫn mảnh trước
-        empty_streak = empty_streak + 1 if new == 0 else 0
+        leaf_seen = len(leaf_seen_set)
+        # Một bucket có thể chồng bucket trước. Chỉ dừng khi API lặp trong
+        # chính bucket này, không dừng vì bản ghi đã tồn tại ở bucket khác.
+        empty_streak = empty_streak + 1 if leaf_new == 0 else 0
         # In dày ở đầu để thấy ngay là chạy được, sau đó thưa lại cho đỡ rối.
         if n <= 5 or n % 10 == 0 or new == 0:
             pct = f" ({leaf_seen * 100 // total}% của mảnh này)" if total else ""
-            print(f"    trang {page_index}: +{new} mới → {leaf_seen}/{total}{pct}"
+            overlap = f", +{leaf_new} trong mảnh" if leaf_new != new else ""
+            print(f"    trang {page_index}: +{new} mới{overlap} → {leaf_seen}/{total}{pct}"
                   f" | tổng gộp toàn thành phố: {len(seen)}")
 
         if n % config.CHECKPOINT_EVERY == 0:
             _save(city, dedupe(collector.rows), out, False, total)
 
         if is_last_page(payload):
-            print(f"    · Server báo hết trang ở trang {page_index}.")
-            break
+            if total and leaf_seen < total * 0.90:
+                print(f"    · Server báo hết sớm ở trang {page_index} "
+                      f"({leaf_seen}/{total}); tiếp tục kiểm chứng.")
+            else:
+                print(f"    · Server báo hết trang ở trang {page_index}.")
+                break
         if empty_streak >= 3:
             print("    · 3 trang liền không có KS mới — coi như hết.")
             break
@@ -378,7 +524,10 @@ async def paginate(
     return seen
 
 
-async def crawl_one_city(ctx, city: dict, out: Path, max_pages: int) -> list[dict]:
+async def crawl_one_city(
+    ctx, city: dict, out: Path, max_pages: int, allow_recommend: bool = False,
+    target_count: int | None = None,
+) -> tuple[list[dict], int | None, bool]:
     page = await ctx.new_page()
     collector = HotelCollector(city["name"])
     page.on("response", lambda r: asyncio.create_task(collector.on_response(r)))
@@ -412,22 +561,113 @@ async def crawl_one_city(ctx, city: dict, out: Path, max_pages: int) -> list[dic
             break
         await page.wait_for_timeout(config.SCROLL_PAUSE_MS)
 
+    # Với một số AB test, vào URL trực tiếp chỉ trả danh sách SEO rút gọn và
+    # cuộn không phát request. Click nút Tìm để frontend tự tạo token/request
+    # đầy đủ giống thao tác người dùng thật.
+    if not collector.template:
+        try:
+            search_button = page.get_by_role("button", name="Tìm", exact=True)
+            if await search_button.count():
+                print("  • Chưa có mẫu API — kích hoạt nút Tìm trên trang…")
+                await search_button.first.click()
+                await page.wait_for_timeout(5000)
+                for _ in range(5):
+                    if collector.template:
+                        break
+                    await page.evaluate(SCROLL_TO_BOTTOM_JS)
+                    await page.wait_for_timeout(config.SCROLL_PAUSE_MS)
+                html = await page.content()
+                (config.HTML_DIR / f"list_{city['id']}.html").write_text(
+                    html, encoding="utf-8"
+                )
+        except Exception as e:
+            print(f"    ! Không kích hoạt được nút Tìm: {e}")
+
+    # Một số phiên/AB test render card nhưng không phát fetchHotelList ở
+    # browser. Khi đó Next.js vẫn nhúng body chuẩn trong initListRequest.
+    if not collector.template:
+        init_request = extract_next_object(html, "initListRequest")
+        if init_request:
+            init_request.setdefault("head", {})["isSSR"] = False
+            collector.template = {
+                "url": LIST_URL,
+                "headers": {
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                },
+                "post_data": json.dumps(init_request, ensure_ascii=False),
+                "endpoint": LIST_ENDPOINT,
+            }
+            print("  • Dùng initListRequest trong HTML làm mẫu API.")
+
     if collector.template:
         tpl = collector.template
+        if tpl.get("endpoint") == RECOMMEND_ENDPOINT and not allow_recommend:
+            await page.close()
+            raise SystemExit(
+                "Trip.com đang dùng fetchRecommendList (tập gợi ý rút gọn), không phải "
+                "fetchHotelList đầy đủ. Browser profile hiện có khả năng đã đăng xuất.\n"
+                "→ Chạy: python src/setup_profile.py\n"
+                "→ Đăng nhập Trip.com, tìm thử TP.HCM, rồi đóng Chromium và chạy lại.\n"
+                "Nếu chủ ý chỉ lấy tập rút gọn, thêm --allow-recommend."
+            )
         base_filters = json.loads(tpl["post_data"]).get("filters", [])
         baseline = await probe_count(page, tpl, base_filters, []) or total
+        known_totals = [x for x in (baseline, total) if x is not None]
+        expected_total = max(known_totals) if known_totals else None
 
         if baseline and baseline > config.PARTITION_CAP:
-            print(f"  • ~{baseline} KS, vượt ngưỡng chặn mềm {config.PARTITION_CAP} "
-                  f"→ dò bộ chia truy vấn…")
-            plan = await build_partition(page, tpl, base_filters, [], baseline)
-            print(f"    chia thành {len(plan)} mảnh: "
-                  + ", ".join(f"{_fmt_extra(e)}~{c}" for e, c in plan))
+            goal = target_count or int(expected_total * config.MIN_COMPLETE_RATIO)
+            print(f"  • ~{baseline} KS, chạy thu hoạch nhiều lớp; mục tiêu {goal} ID duy nhất…")
+            price_options = [
+                p for p in extract_filter_options(html, "15")
+                if re.fullmatch(r"15\|(?:\d+|max)", p.get("filterId", ""))
+                and _price_bounds(p)
+            ]
+            price_options.sort(key=lambda p: _price_bounds(p)[0])
+            property_types = [
+                p for p in extract_filter_options(html, "75")
+                if re.fullmatch(r"75\|TAG_[A-Za-z0-9_-]+", p.get("filterId", ""))
+            ]
+            stars = [
+                {"type": "16", "value": str(v), "filterId": f"16|{v}", "subType": "2"}
+                for v in (2, 3, 4, 5)
+            ]
+            phases: list[tuple[str, list[list[dict]]]] = [
+                ("truy vấn gốc", [[]]),
+                ("khoảng giá", [[p] for p in price_options]),
+                ("giá × hạng sao", [[p, s] for p in price_options for s in stars]),
+                ("giá × loại chỗ nghỉ", [
+                    [p, kind] for p in price_options for kind in property_types
+                ]),
+                ("giá × sao × loại chỗ nghỉ", [
+                    [p, s, kind]
+                    for p in price_options for s in stars for kind in property_types
+                ]),
+            ]
             seen = {r["trip_hotel_id"] for r in collector.rows}
-            for extra, cnt in plan:
-                seen = await paginate(page, collector, city, out, cnt, max_pages,
-                                       extra_filters=extra, seen=seen)
-                _save(city, dedupe(collector.rows), out, False, baseline)
+            signatures: set[tuple[tuple[str, str], ...]] = set()
+            for phase_name, variants in phases:
+                if len(seen) >= goal:
+                    break
+                print(f"\n  ◆ {phase_name}: tối đa {len(variants)} truy vấn")
+                for index, extra in enumerate(variants, 1):
+                    signature = tuple(sorted((x["type"], x["value"]) for x in extra))
+                    if signature in signatures:
+                        continue
+                    signatures.add(signature)
+                    before = len(seen)
+                    seen = await paginate(
+                        page, collector, city, out, None, max_pages,
+                        extra_filters=extra, seen=seen,
+                    )
+                    gain = len(seen) - before
+                    print(f"    ↳ mảnh {index}/{len(variants)}: +{gain}; "
+                          f"tổng {len(seen)}/{goal}")
+                    _save(city, dedupe(collector.rows), out, False, expected_total)
+                    if len(seen) >= goal:
+                        print(f"  ✓ Đạt mục tiêu {goal} ID, dừng các lớp còn lại.")
+                        break
         else:
             await paginate(page, collector, city, out, baseline, max_pages)
     else:
@@ -435,11 +675,20 @@ async def crawl_one_city(ctx, city: dict, out: Path, max_pages: int) -> list[dic
         print(f"    Xem {collector.dump_dir} và ảnh chụp bên dưới rồi gửi lại cho em.")
         await page.screenshot(path=str(config.HTML_DIR / f"debug_{city['id']}_notpl.png"))
 
+        expected_total = total
+
     result = dedupe(collector.rows)
-    pct = f" ({len(result) * 100 // total}% của {total})" if total else ""
+    complete = (
+        len(result) >= target_count if target_count
+        else bool(expected_total and len(result) >= expected_total * config.MIN_COMPLETE_RATIO)
+    )
+    pct = f" ({len(result) * 100 // expected_total}% của {expected_total})" if expected_total else ""
     print(f"  → {len(result)} khách sạn duy nhất{pct}")
+    if expected_total and not complete:
+        print(f"  ⚠ Chưa đạt ngưỡng hoàn chỉnh {config.MIN_COMPLETE_RATIO:.0%}; "
+              "file checkpoint được giữ với complete=false.")
     await page.close()
-    return result
+    return result, expected_total, complete
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -466,9 +715,13 @@ async def main(args: argparse.Namespace) -> None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         for i, city in enumerate(cities):
             out = config.DATA_DIR / f"api_hotels_{city['id']}_{stamp}.json"
-            rows = await crawl_one_city(ctx, city, out, max_pages)
+            rows, expected_total, complete = await crawl_one_city(
+                ctx, city, out, max_pages,
+                allow_recommend=args.allow_recommend,
+                target_count=args.target_count,
+            )
             if rows:
-                _save(city, rows, out, True, None)
+                _save(city, rows, out, complete, expected_total)
                 print(f"  → lưu {out}")
                 print(f"    nạp DB: python src/db/loader.py {out.name}")
 
@@ -483,6 +736,14 @@ if __name__ == "__main__":
     ap.add_argument("--city", help="lọc theo tên (khớp một phần, không phân biệt hoa thường)")
     ap.add_argument("--city-id", type=int, help="chỉ chạy đúng 1 cityId")
     ap.add_argument("--max-pages", type=int, help="giới hạn số trang API (chạy thử nhanh)")
+    ap.add_argument(
+        "--allow-recommend", action="store_true",
+        help="cho phép crawl fetchRecommendList rút gọn khi profile đang đăng xuất",
+    )
+    ap.add_argument(
+        "--target-count", type=int,
+        help="dừng khi đạt số trip_hotel_id duy nhất này (vd 6000)",
+    )
     args = ap.parse_args()
 
     if sys.platform == "win32":
