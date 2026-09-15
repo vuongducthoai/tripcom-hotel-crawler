@@ -48,7 +48,41 @@ MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "3"))
 MAX_SCROLL_ROUNDS = int(os.getenv("MAX_SCROLL_ROUNDS", "25"))
 SCROLL_PAUSE_MS = int(os.getenv("SCROLL_PAUSE_MS", "1500"))
 
+# --- gọi thẳng API phân trang (nhanh hơn cuộn rất nhiều) ---
+# 6546 KS / 20 mỗi trang ≈ 330 lượt gọi. Delay 0.8-1.8s → khoảng 7-10 phút/thành phố.
+MAX_API_PAGES = int(os.getenv("MAX_API_PAGES", "400"))
+API_PAGE_SIZE = int(os.getenv("API_PAGE_SIZE", "20"))
+API_MIN_DELAY = float(os.getenv("API_MIN_DELAY", "0.8"))
+API_MAX_DELAY = float(os.getenv("API_MAX_DELAY", "1.8"))
+CHECKPOINT_EVERY = int(os.getenv("CHECKPOINT_EVERY", "20"))
+
+# --- chia nhỏ truy vấn khi thành phố vượt ngưỡng chặn mềm của Trip.com ---
+# Quan sát thực tế: server tự báo "hết trang" ở khoảng 3000 KS dù thành phố
+# có nhiều hơn (vd TP.HCM báo 6545 nhưng crawl thẳng chỉ ra 3047). Đặt thấp
+# hơn một chút (2800) cho an toàn — xem docs/recon.md mục "chặn mềm 3000".
+PARTITION_CAP = int(os.getenv("PARTITION_CAP", "2800"))
+# 2 trục đã xác nhận CÓ tác dụng qua probe_filters.py (loại 16, 23 — có vẻ
+# là nhãn/tag chứ không phải phân loại tách biệt, các nhánh có thể chồng
+# lên nhau — không sao vì kết quả cuối cùng luôn dedupe theo trip_hotel_id).
+# Loại 17 (sắp xếp), 80 (giá), 15 bị server bỏ qua — đã kiểm chứng, không dùng.
+PARTITION_AXES = ["16", "23"]
+PARTITION_AXIS_VALUES = range(0, 8)   # dò rộng hơn số liệu quan sát (0-5) cho an toàn
+PARTITION_MAX_LEAVES = 60             # chặn bùng nổ tổ hợp nếu thành phố quá lớn
+
 RESPECT_ROBOTS = os.getenv("RESPECT_ROBOTS", "true").lower() == "true"
+
+# ---------------------------------------------------------------- thành phố VN
+# ID thật lấy từ response getCityList lúc recon — xem output/recon/bodies/008_*.
+# Thêm/bớt tuỳ phạm vi anh Thắng chốt ở Giai đoạn 0.
+VN_CITIES: list[dict] = [
+    {"id": 301, "name": "TP. Hồ Chí Minh"},
+    {"id": 286, "name": "Hà Nội"},
+    {"id": 1356, "name": "Đà Nẵng"},
+    {"id": 1777, "name": "Nha Trang"},
+    {"id": 5204, "name": "Đà Lạt"},
+    {"id": 4134, "name": "Phan Thiết"},
+    {"id": 5649, "name": "Đảo Phú Quốc"},
+]
 
 # ---------------------------------------------------------------- database
 DB = {
