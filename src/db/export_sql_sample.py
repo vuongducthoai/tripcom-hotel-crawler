@@ -62,6 +62,9 @@ def main(args: argparse.Namespace) -> None:
 
     schema_001 = (config.ROOT / "migrations" / "001_init.sql").read_text(encoding="utf-8")
     schema_002 = (config.ROOT / "migrations" / "002_multilingual.sql").read_text(encoding="utf-8")
+    schema_003 = (config.ROOT / "migrations" / "003_room_details.sql").read_text(encoding="utf-8")
+    schema_004 = (config.ROOT / "migrations" / "004_hotel_policies.sql").read_text(encoding="utf-8")
+    schema_005 = (config.ROOT / "migrations" / "005_amenity_fees_nearby_places.sql").read_text(encoding="utf-8")
 
     table_queries = [
         (
@@ -133,6 +136,34 @@ def main(args: argparse.Namespace) -> None:
             """,
         ),
         (
+            "hotel_policies",
+            """
+            SELECT p.* FROM hotel_policies p JOIN hotels h ON h.id=p.hotel_id
+            WHERE h.trip_hotel_id=ANY(%s) ORDER BY p.id
+            """,
+        ),
+        (
+            "hotel_policy_translations",
+            """
+            SELECT t.* FROM hotel_policy_translations t
+            JOIN hotel_policies p ON p.id=t.hotel_policy_id
+            JOIN hotels h ON h.id=p.hotel_id
+            WHERE h.trip_hotel_id=ANY(%s)
+            ORDER BY t.hotel_policy_id, t.locale
+            """,
+        ),
+        (
+            "hotel_nearby_places",
+            "SELECT p.* FROM hotel_nearby_places p JOIN hotels h ON h.id=p.hotel_id WHERE h.trip_hotel_id=ANY(%s) ORDER BY p.id",
+        ),
+        (
+            "hotel_nearby_place_translations",
+            """SELECT t.* FROM hotel_nearby_place_translations t
+            JOIN hotel_nearby_places p ON p.id=t.nearby_place_id
+            JOIN hotels h ON h.id=p.hotel_id WHERE h.trip_hotel_id=ANY(%s)
+            ORDER BY t.nearby_place_id,t.locale""",
+        ),
+        (
             "room_types",
             """
             SELECT r.* FROM room_types r JOIN hotels h ON h.id=r.hotel_id
@@ -147,6 +178,35 @@ def main(args: argparse.Namespace) -> None:
             JOIN hotels h ON h.id=r.hotel_id
             WHERE h.trip_hotel_id=ANY(%s)
             ORDER BY t.room_type_id, t.locale
+            """,
+        ),
+        (
+            "room_images",
+            """
+            SELECT i.* FROM room_images i
+            JOIN room_types r ON r.id=i.room_type_id
+            JOIN hotels h ON h.id=r.hotel_id
+            WHERE h.trip_hotel_id=ANY(%s) ORDER BY i.id
+            """,
+        ),
+        (
+            "room_amenities",
+            """
+            SELECT a.* FROM room_amenities a
+            JOIN room_types r ON r.id=a.room_type_id
+            JOIN hotels h ON h.id=r.hotel_id
+            WHERE h.trip_hotel_id=ANY(%s) ORDER BY a.id
+            """,
+        ),
+        (
+            "room_amenity_translations",
+            """
+            SELECT t.* FROM room_amenity_translations t
+            JOIN room_amenities a ON a.id=t.room_amenity_id
+            JOIN room_types r ON r.id=a.room_type_id
+            JOIN hotels h ON h.id=r.hotel_id
+            WHERE h.trip_hotel_id=ANY(%s)
+            ORDER BY t.room_amenity_id, t.locale
             """,
         ),
         (
@@ -167,13 +227,17 @@ def main(args: argparse.Namespace) -> None:
             output.write("-- Restore: psql -v ON_ERROR_STOP=1 -d <database> -f <this-file>\n\n")
             output.write(schema_001.rstrip() + "\n\n")
             output.write(schema_002.rstrip() + "\n\n")
+            output.write(schema_003.rstrip() + "\n\n")
+            output.write(schema_004.rstrip() + "\n\n")
+            output.write(schema_005.rstrip() + "\n\n")
             output.write("BEGIN;\nSET client_encoding = 'UTF8';\n")
             for table, query in table_queries:
                 counts[table] = emit_rows(cur, output, table, query, (trip_ids,))
 
             for table in (
-                "locations", "hotels", "hotel_images", "hotel_amenities",
-                "room_types", "hotel_prices",
+                "locations", "hotels", "hotel_images", "hotel_amenities", "hotel_policies",
+                "hotel_nearby_places",
+                "room_types", "room_images", "room_amenities", "hotel_prices",
             ):
                 output.write(
                     f"SELECT setval(pg_get_serial_sequence('public.{table}', 'id'), "

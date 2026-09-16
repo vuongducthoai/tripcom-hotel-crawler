@@ -27,9 +27,14 @@ def main(args: argparse.Namespace) -> None:
     locale = args.locale
     currency = args.currency.upper()
     raw_root = config.OUTPUT_DIR / "details" / "raw"
-    raw_dir = raw_root / locale / currency
-    if not raw_dir.exists() and locale == "vi-VN" and currency == "VND":
-        raw_dir = raw_root
+    if args.raw_dir:
+        raw_dir = Path(args.raw_dir)
+        if not raw_dir.is_absolute():
+            raw_dir = config.ROOT / raw_dir
+    else:
+        raw_dir = raw_root / locale / currency
+        if not raw_dir.exists() and locale == "vi-VN" and currency == "VND":
+            raw_dir = raw_root
     raw_files = sorted(raw_dir.glob("*.json"))
     if not raw_files:
         raise SystemExit(f"Không tìm thấy raw capture nào trong {raw_dir}")
@@ -53,7 +58,7 @@ def main(args: argparse.Namespace) -> None:
 
         old_room_count = len(base.get("rooms") or [])
         try:
-            fresh = extract_detail(responses, hotel_id, url, currency)
+            fresh = extract_detail(responses, hotel_id, url, currency, locale)
         except Exception as exc:
             print(f"  LỖI extract {path.name}: {type(exc).__name__}: {exc}")
             base.setdefault("trip_hotel_id", hotel_id)
@@ -76,6 +81,8 @@ def main(args: argparse.Namespace) -> None:
         base["hotel_type"] = fresh["hotel_type"]
         base["images"] = fresh["images"]
         base["amenities"] = fresh["amenities"]
+        base["policies"] = fresh["policies"]
+        base["nearby_places"] = fresh["nearby_places"]
         base["rooms"] = fresh["rooms"]
         base["response_count"] = fresh["response_count"]
         base["parser_version"] = fresh["parser_version"]
@@ -122,4 +129,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--locale", default="vi-VN", help="vi-VN hoặc en-US")
     parser.add_argument("--currency", default="VND", help="VND hoặc USD")
+    parser.add_argument(
+        "--raw-dir",
+        help="thư mục raw cần reparse, ví dụ output/details/raw cho cache legacy",
+    )
     main(parser.parse_args())

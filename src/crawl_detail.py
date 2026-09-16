@@ -182,6 +182,51 @@ def market_raw_dir(locale: str, currency: str) -> Path:
     return path
 
 
+async def _capture_hotel_policy_text(page, locale: str) -> str | None:
+    """Open Trip.com's Policies panel and return the smallest matching DOM block."""
+    labels = ("Policies", "Hotel policies") if locale.lower().startswith("en") else (
+        "Chính Sách", "Chính sách",
+    )
+    clicked = False
+    for label in labels:
+        locator = page.get_by_text(label, exact=True)
+        for index in range(await locator.count() - 1, -1, -1):
+            candidate = locator.nth(index)
+            try:
+                if await candidate.is_visible():
+                    await candidate.click(timeout=2500)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if clicked:
+            break
+    if not clicked:
+        return None
+    await page.wait_for_timeout(800)
+    phrases = (
+        ["check-in and check-out", "child policies", "pets", "age requirements"]
+        if locale.lower().startswith("en")
+        else ["thời gian nhận và trả phòng", "chính sách cho trẻ em", "thú cưng", "giới hạn độ tuổi"]
+    )
+    return await page.evaluate(
+        """(phrases) => {
+            const visible = (el) => {
+                const s = getComputedStyle(el), r = el.getBoundingClientRect();
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+            };
+            const candidates = [...document.querySelectorAll('body *')]
+                .filter(visible)
+                .map(el => ({el, text: (el.innerText || '').trim()}))
+                .filter(x => x.text.length >= 80 && x.text.length <= 20000)
+                .filter(x => phrases.filter(p => x.text.toLocaleLowerCase().includes(p)).length >= 3)
+                .sort((a, b) => a.text.length - b.text.length);
+            return candidates.length ? candidates[0].text : null;
+        }""",
+        list(phrases),
+    )
+
+
 async def crawl_one(
     ctx, target: dict, checkin: str, checkout: str, locale: str, currency: str
 ) -> dict:
@@ -229,9 +274,16 @@ async def crawl_one(
                 "response": {"description": meta_description},
             })
 
+        policy_text = await _capture_hotel_policy_text(page, locale)
+        if policy_text:
+            packets.append({
+                "url": "embedded:hotel-policies", "method": "EMBEDDED", "status": 200,
+                "response": {"text": policy_text},
+            })
+
         if tasks:
             await asyncio.gather(*list(tasks), return_exceptions=True)
-        normalized = extract_detail(packets, hotel_id, url, currency)
+        normalized = extract_detail(packets, hotel_id, url, currency, locale)
         spider_code = next(
             (code for packet in packets
              if (code := _spider_error_code(packet.get("response"))) is not None),
@@ -273,7 +325,17 @@ async def crawl_one(
             "error": f"{type(exc).__name__}: {exc}",
             "images": [], "amenities": [], "rooms": [],
         }
-        raw_path.write_text(
+        error_path = raw_path
+        if raw_path.exists():
+            try:
+                previous = json.loads(raw_path.read_text(encoding="utf-8"))
+                if (previous.get("normalized") or {}).get("success"):
+                    error_path = raw_path.with_name(
+                        f"{hotel_id}.failed.{datetime.now():%Y%m%d_%H%M%S}.json"
+                    )
+            except Exception:
+                pass
+        error_path.write_text(
             json.dumps({"target": target, "normalized": result, "responses": packets},
                        ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -306,6 +368,7 @@ def _load_cached(hotel_id: str, locale: str, currency: str) -> dict | None:
                 str(target.get("trip_hotel_id") or hotel_id),
                 dump.get("url") or value.get("url") or target.get("url") or "",
                 currency,
+                locale,
             )
             fresh["name"] = fresh.get("name") or value.get("name") or target.get("name")
             fresh["address"] = (

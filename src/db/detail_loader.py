@@ -62,8 +62,10 @@ def main(args: argparse.Namespace) -> None:
     stats = {
         "hotels": 0, "missing_hotels": 0, "failed": 0,
         "locations": 0, "images": 0, "image_categories": 0,
-        "amenities": 0, "rooms": 0,
+        "amenities": 0, "policies": 0, "nearby_places": 0, "rooms": 0,
+        "room_images": 0, "room_amenities": 0,
         "prices": 0, "prices_skipped_no_dates": 0,
+        "orphan_images_removed": 0, "orphan_amenities_removed": 0,
     }
     location_ids: set[int] = set()
     save_prices = not args.no_prices
@@ -78,6 +80,21 @@ def main(args: argparse.Namespace) -> None:
                 "Chưa có bảng hotel_image_categories. Hãy chạy lại "
                 "migrations/002_multilingual.sql trước."
             )
+        cur.execute("SELECT to_regclass('public.room_amenities')")
+        if cur.fetchone()[0] is None:
+            raise SystemExit(
+                "Chưa có bảng chi tiết phòng. Hãy chạy "
+                "migrations/003_room_details.sql trước."
+            )
+        cur.execute("SELECT to_regclass('public.hotel_policies')")
+        if cur.fetchone()[0] is None:
+            raise SystemExit(
+                "Chưa có bảng chính sách khách sạn. Hãy chạy "
+                "migrations/004_hotel_policies.sql trước."
+            )
+        cur.execute("SELECT to_regclass('public.hotel_nearby_places')")
+        if cur.fetchone()[0] is None:
+            raise SystemExit("Hãy chạy migrations/005_amenity_fees_nearby_places.sql trước.")
         replaced_hotels = 0
         if args.replace_existing:
             trip_ids = [
@@ -104,12 +121,28 @@ def main(args: argparse.Namespace) -> None:
                     (replace_ids, locale),
                 )
                 cur.execute(
+                    "DELETE FROM room_amenity_translations t USING room_amenities a, room_types r "
+                    "WHERE t.room_amenity_id=a.id AND a.room_type_id=r.id "
+                    "AND r.hotel_id=ANY(%s) AND t.locale=%s",
+                    (replace_ids, locale),
+                )
+                cur.execute(
                     "DELETE FROM hotel_amenity_translations t USING hotel_amenities a "
                     "WHERE t.hotel_amenity_id=a.id AND a.hotel_id=ANY(%s) AND t.locale=%s",
                     (replace_ids, locale),
                 )
                 cur.execute(
                     "DELETE FROM hotel_translations WHERE hotel_id=ANY(%s) AND locale=%s",
+                    (replace_ids, locale),
+                )
+                cur.execute(
+                    "DELETE FROM hotel_policy_translations t USING hotel_policies p "
+                    "WHERE t.hotel_policy_id=p.id AND p.hotel_id=ANY(%s) AND t.locale=%s",
+                    (replace_ids, locale),
+                )
+                cur.execute(
+                    "DELETE FROM hotel_nearby_place_translations t USING hotel_nearby_places p "
+                    "WHERE t.nearby_place_id=p.id AND p.hotel_id=ANY(%s) AND t.locale=%s",
                     (replace_ids, locale),
                 )
                 cur.execute(
@@ -226,6 +259,70 @@ def main(args: argparse.Namespace) -> None:
             )
             stats["hotels"] += 1
 
+            for place in detail.get("nearby_places") or []:
+                if not place.get("trip_poi_id") or not place.get("name"):
+                    continue
+                cur.execute("""
+                    INSERT INTO hotel_nearby_places
+                        (hotel_id, trip_poi_id, category_code, poi_type, latitude, longitude,
+                         distance_km, arrival_type, sort_order)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (hotel_id, trip_poi_id) DO UPDATE SET
+                        category_code=EXCLUDED.category_code, poi_type=EXCLUDED.poi_type,
+                        latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude,
+                        distance_km=EXCLUDED.distance_km, arrival_type=EXCLUDED.arrival_type,
+                        sort_order=EXCLUDED.sort_order
+                    RETURNING id
+                """, (db_hotel_id, place["trip_poi_id"], place.get("category_code"),
+                      place.get("poi_type"), place.get("latitude"), place.get("longitude"),
+                      place.get("distance_km"), place.get("arrival_type"),
+                      place.get("sort_order", 0)))
+                place_id = cur.fetchone()[0]
+                cur.execute("""
+                    INSERT INTO hotel_nearby_place_translations
+                        (nearby_place_id, locale, name, category_name, distance_text,
+                         description, tags)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (nearby_place_id, locale) DO UPDATE SET
+                        name=EXCLUDED.name, category_name=EXCLUDED.category_name,
+                        distance_text=EXCLUDED.distance_text, description=EXCLUDED.description,
+                        tags=EXCLUDED.tags, updated_at=now()
+                """, (place_id, locale, place["name"], place.get("category_name"),
+                      place.get("distance_text"), place.get("description"),
+                      Json(place.get("tags") or [])))
+                stats["nearby_places"] += 1
+
+            for policy in detail.get("policies") or []:
+                code = policy.get("code")
+                title = policy.get("title")
+                if not code or not title:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO hotel_policies (hotel_id, policy_code, sort_order)
+                    VALUES (%s,%s,%s)
+                    ON CONFLICT (hotel_id, policy_code) DO UPDATE SET
+                        sort_order=LEAST(hotel_policies.sort_order, EXCLUDED.sort_order)
+                    RETURNING id
+                    """,
+                    (db_hotel_id, code, policy.get("sort_order", 0)),
+                )
+                policy_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO hotel_policy_translations
+                        (hotel_policy_id, locale, title, description, raw_json)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (hotel_policy_id, locale) DO UPDATE SET
+                        title=EXCLUDED.title,
+                        description=EXCLUDED.description,
+                        raw_json=EXCLUDED.raw_json,
+                        updated_at=now()
+                    """,
+                    (policy_id, locale, title, policy.get("description"), Json(policy)),
+                )
+                stats["policies"] += 1
+
             image_rows = [
                 (db_hotel_id, image.get("url"), image.get("category"), image.get("sort_order", 0))
                 for image in (detail.get("images") or []) if image.get("url")
@@ -293,35 +390,46 @@ def main(args: argparse.Namespace) -> None:
                     cur.execute(
                         """
                         INSERT INTO hotel_amenities
-                            (hotel_id, amenity_code, amenity_name, category)
-                        VALUES (%s,%s,%s,%s)
+                            (hotel_id, amenity_code, amenity_name, category, free_type, is_highlight)
+                        VALUES (%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (hotel_id, amenity_name) DO UPDATE SET
                             amenity_code=COALESCE(EXCLUDED.amenity_code, hotel_amenities.amenity_code),
-                            category=CASE WHEN %s='vi-VN'
-                                          THEN COALESCE(EXCLUDED.category, hotel_amenities.category)
-                                          ELSE hotel_amenities.category END
+                            category=CASE WHEN %s='vi-VN' THEN EXCLUDED.category
+                                          ELSE COALESCE(hotel_amenities.category,
+                                                        EXCLUDED.category) END,
+                            free_type=COALESCE(EXCLUDED.free_type, hotel_amenities.free_type),
+                            is_highlight=COALESCE(EXCLUDED.is_highlight, hotel_amenities.is_highlight)
                         RETURNING id
                         """,
-                        (db_hotel_id, amenity_code, amenity_name, item.get("category"), locale),
+                        (db_hotel_id, amenity_code, amenity_name, item.get("category"),
+                         item.get("free_type"), item.get("is_highlight"), locale),
                     )
                     amenity_db_id = cur.fetchone()[0]
-                elif locale == "vi-VN" and item.get("category"):
+                elif item.get("category"):
                     cur.execute(
-                        "UPDATE hotel_amenities SET category=%s WHERE id=%s",
-                        (item.get("category"), amenity_db_id),
+                        """
+                        UPDATE hotel_amenities SET category=
+                            CASE WHEN %s='vi-VN' THEN %s
+                                 ELSE COALESCE(category, %s) END
+                        WHERE id=%s
+                        """,
+                        (locale, item.get("category"), item.get("category"), amenity_db_id),
                     )
                 cur.execute(
                     """
                     INSERT INTO hotel_amenity_translations
-                        (hotel_amenity_id, locale, amenity_name, category)
-                    VALUES (%s,%s,%s,%s)
+                        (hotel_amenity_id, locale, amenity_name, category, fee_label, additional_info)
+                    VALUES (%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (hotel_amenity_id, locale) DO UPDATE SET
                         amenity_name=EXCLUDED.amenity_name,
                         category=COALESCE(EXCLUDED.category,
                                           hotel_amenity_translations.category),
+                        fee_label=EXCLUDED.fee_label,
+                        additional_info=EXCLUDED.additional_info,
                         updated_at=now()
                     """,
-                    (amenity_db_id, locale, amenity_name, item.get("category")),
+                    (amenity_db_id, locale, amenity_name, item.get("category"),
+                     item.get("fee_label"), Json(item.get("additional_info") or [])),
                 )
                 stats["amenities"] += 1
 
@@ -330,8 +438,9 @@ def main(args: argparse.Namespace) -> None:
                     continue
                 cur.execute("""
                     INSERT INTO room_types
-                        (hotel_id, trip_room_id, name, bed_type, max_occupancy, area_sqm, raw_json)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                        (hotel_id, trip_room_id, name, bed_type, max_occupancy, area_sqm,
+                         bedroom_count, bathroom_count, bed_count, raw_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (hotel_id, trip_room_id) DO UPDATE SET
                         name=CASE WHEN %s='vi-VN' THEN EXCLUDED.name ELSE room_types.name END,
                         bed_type=CASE WHEN %s='vi-VN'
@@ -339,11 +448,16 @@ def main(args: argparse.Namespace) -> None:
                                       ELSE room_types.bed_type END,
                         max_occupancy=COALESCE(EXCLUDED.max_occupancy, room_types.max_occupancy),
                         area_sqm=COALESCE(EXCLUDED.area_sqm, room_types.area_sqm),
+                        bedroom_count=COALESCE(EXCLUDED.bedroom_count, room_types.bedroom_count),
+                        bathroom_count=COALESCE(EXCLUDED.bathroom_count, room_types.bathroom_count),
+                        bed_count=COALESCE(EXCLUDED.bed_count, room_types.bed_count),
                         raw_json=CASE WHEN %s='vi-VN' THEN EXCLUDED.raw_json ELSE room_types.raw_json END
                     RETURNING id
                 """, (
                     db_hotel_id, room["trip_room_id"], room["name"], room.get("bed_type"),
-                    room.get("max_occupancy"), room.get("area_sqm"), Json(room.get("raw") or room),
+                    room.get("max_occupancy"), room.get("area_sqm"),
+                    room.get("bedroom_count"), room.get("bathroom_count"), room.get("bed_count"),
+                    Json(room.get("raw") or room),
                     locale, locale, locale,
                 ))
                 room_db_id = cur.fetchone()[0]
@@ -352,18 +466,79 @@ def main(args: argparse.Namespace) -> None:
                 cur.execute(
                     """
                     INSERT INTO room_type_translations
-                        (room_type_id, locale, name, bed_type, raw_json, crawled_at)
-                    VALUES (%s,%s,%s,%s,%s,%s)
+                        (room_type_id, locale, name, bed_type, view_name, smoking_policy,
+                         wifi, floor_label, extra_bed_policy, raw_json, crawled_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (room_type_id, locale) DO UPDATE SET
                         name=EXCLUDED.name,
                         bed_type=COALESCE(EXCLUDED.bed_type, room_type_translations.bed_type),
+                        view_name=EXCLUDED.view_name,
+                        smoking_policy=EXCLUDED.smoking_policy,
+                        wifi=EXCLUDED.wifi,
+                        floor_label=EXCLUDED.floor_label,
+                        extra_bed_policy=EXCLUDED.extra_bed_policy,
                         raw_json=EXCLUDED.raw_json,
                         crawled_at=EXCLUDED.crawled_at,
                         updated_at=now()
                     """,
                     (room_db_id, locale, room["name"], room.get("bed_type"),
+                     room.get("view_name"), room.get("smoking_policy"), room.get("wifi"),
+                     room.get("floor_label"), room.get("extra_bed_policy"),
                      Json(room.get("raw") or room), captured_at(detail.get("crawled_at"))),
                 )
+
+                room_image_rows = [
+                    (room_db_id, item.get("url"), item.get("category_code"), item.get("sort_order", 0))
+                    for item in (room.get("images") or []) if item.get("url")
+                ]
+                if room_image_rows:
+                    execute_values(cur, """
+                        INSERT INTO room_images (room_type_id, url, category_code, sort_order)
+                        VALUES %s
+                        ON CONFLICT (room_type_id, url) DO UPDATE SET
+                            category_code=COALESCE(EXCLUDED.category_code, room_images.category_code),
+                            sort_order=EXCLUDED.sort_order
+                    """, room_image_rows)
+                    stats["room_images"] += len(room_image_rows)
+
+                for amenity in room.get("amenities") or []:
+                    amenity_key = amenity.get("key")
+                    amenity_name = amenity.get("name")
+                    if not amenity_key or not amenity_name:
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO room_amenities
+                            (room_type_id, amenity_key, amenity_code, category_code,
+                             is_highlight, free_type)
+                        VALUES (%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (room_type_id, amenity_key) DO UPDATE SET
+                            amenity_code=COALESCE(EXCLUDED.amenity_code, room_amenities.amenity_code),
+                            category_code=COALESCE(EXCLUDED.category_code, room_amenities.category_code),
+                            is_highlight=COALESCE(EXCLUDED.is_highlight, room_amenities.is_highlight),
+                            free_type=COALESCE(EXCLUDED.free_type, room_amenities.free_type)
+                        RETURNING id
+                        """,
+                        (room_db_id, amenity_key, amenity.get("code"),
+                         amenity.get("category_code"), amenity.get("is_highlight"),
+                         amenity.get("free_type")),
+                    )
+                    room_amenity_id = cur.fetchone()[0]
+                    cur.execute(
+                        """
+                        INSERT INTO room_amenity_translations
+                            (room_amenity_id, locale, amenity_name, category_name, additional_info)
+                        VALUES (%s,%s,%s,%s,%s)
+                        ON CONFLICT (room_amenity_id, locale) DO UPDATE SET
+                            amenity_name=EXCLUDED.amenity_name,
+                            category_name=EXCLUDED.category_name,
+                            additional_info=EXCLUDED.additional_info,
+                            updated_at=now()
+                        """,
+                        (room_amenity_id, locale, amenity_name, amenity.get("category"),
+                         Json(amenity.get("additional_info") or [])),
+                    )
+                    stats["room_amenities"] += 1
 
                 if save_prices and room.get("price") is not None:
                     check_in, check_out = detail.get("check_in"), detail.get("check_out")
@@ -408,6 +583,32 @@ def main(args: argparse.Namespace) -> None:
                              locale, room.get("tax_included"), captured, captured.date()),
                         )
                     stats["prices"] += 1
+
+        if args.replace_existing and replace_ids:
+            cur.execute(
+                """
+                DELETE FROM hotel_amenities a
+                WHERE a.hotel_id=ANY(%s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hotel_amenity_translations t
+                      WHERE t.hotel_amenity_id=a.id
+                  )
+                """,
+                (replace_ids,),
+            )
+            stats["orphan_amenities_removed"] = cur.rowcount
+            cur.execute(
+                """
+                DELETE FROM hotel_images i
+                WHERE i.hotel_id=ANY(%s)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM hotel_image_categories c
+                      WHERE c.hotel_image_id=i.id
+                  )
+                """,
+                (replace_ids,),
+            )
+            stats["orphan_images_removed"] = cur.rowcount
 
         stats["locations"] = len(location_ids)
         stats["replaced_hotels"] = replaced_hotels

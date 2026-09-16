@@ -123,16 +123,53 @@ def main(args: argparse.Namespace) -> None:
                     "amenities": rows(
                         cur,
                         """
-                        SELECT a.id, a.amenity_code,
+                        SELECT a.id, a.amenity_code, a.free_type, a.is_highlight,
                                jsonb_object_agg(t.locale, jsonb_build_object(
-                                   'name', t.amenity_name, 'category', t.category
+                                   'name', t.amenity_name, 'category', t.category,
+                                   'fee_label', t.fee_label,
+                                   'additional_info', t.additional_info
                                ) ORDER BY t.locale) AS translations
                         FROM hotel_amenities a
                         JOIN hotel_amenity_translations t
                           ON t.hotel_amenity_id=a.id AND t.locale=ANY(%s)
                         WHERE a.hotel_id=%s
-                        GROUP BY a.id, a.amenity_code
+                        GROUP BY a.id, a.amenity_code, a.free_type, a.is_highlight
                         ORDER BY a.id
+                        """,
+                        (list(LOCALES), hotel_id),
+                    ),
+                    "nearby_places": rows(
+                        cur,
+                        """
+                        SELECT p.trip_poi_id, p.category_code, p.poi_type,
+                               p.latitude, p.longitude, p.distance_km, p.arrival_type,
+                               jsonb_object_agg(t.locale, jsonb_build_object(
+                                   'name', t.name, 'category', t.category_name,
+                                   'distance_text', t.distance_text,
+                                   'description', t.description, 'tags', t.tags
+                               ) ORDER BY t.locale) AS translations
+                        FROM hotel_nearby_places p
+                        JOIN hotel_nearby_place_translations t
+                          ON t.nearby_place_id=p.id AND t.locale=ANY(%s)
+                        WHERE p.hotel_id=%s
+                        GROUP BY p.id ORDER BY p.sort_order, p.id
+                        """,
+                        (list(LOCALES), hotel_id),
+                    ),
+                    "policies": rows(
+                        cur,
+                        """
+                        SELECT p.policy_code, p.sort_order,
+                               jsonb_object_agg(t.locale, jsonb_build_object(
+                                   'title', t.title,
+                                   'description', t.description
+                               ) ORDER BY t.locale) AS translations
+                        FROM hotel_policies p
+                        JOIN hotel_policy_translations t
+                          ON t.hotel_policy_id=p.id AND t.locale=ANY(%s)
+                        WHERE p.hotel_id=%s
+                        GROUP BY p.id, p.policy_code, p.sort_order
+                        ORDER BY p.sort_order, p.id
                         """,
                         (list(LOCALES), hotel_id),
                     ),
@@ -140,18 +177,53 @@ def main(args: argparse.Namespace) -> None:
                         cur,
                         """
                         SELECT r.id, r.trip_room_id, r.max_occupancy, r.area_sqm,
+                               r.bedroom_count, r.bathroom_count, r.bed_count,
                                jsonb_object_agg(t.locale, jsonb_build_object(
                                    'name', t.name, 'bed_type', t.bed_type,
+                                   'view_name', t.view_name,
+                                   'smoking_policy', t.smoking_policy,
+                                   'wifi', t.wifi,
+                                   'floor_label', t.floor_label,
+                                   'extra_bed_policy', t.extra_bed_policy,
                                    'crawled_at', t.crawled_at
-                               ) ORDER BY t.locale) AS translations
+                               ) ORDER BY t.locale) AS translations,
+                               COALESCE((
+                                   SELECT jsonb_agg(jsonb_build_object(
+                                       'url', i.url,
+                                       'category_code', i.category_code,
+                                       'sort_order', i.sort_order
+                                   ) ORDER BY i.sort_order, i.id)
+                                   FROM room_images i WHERE i.room_type_id=r.id
+                               ), '[]'::jsonb) AS images,
+                               COALESCE((
+                                   SELECT jsonb_agg(jsonb_build_object(
+                                       'key', a.amenity_key,
+                                       'code', a.amenity_code,
+                                       'category_code', a.category_code,
+                                       'is_highlight', a.is_highlight,
+                                       'free_type', a.free_type,
+                                       'translations', (
+                                           SELECT jsonb_object_agg(at.locale, jsonb_build_object(
+                                               'name', at.amenity_name,
+                                               'category', at.category_name,
+                                               'additional_info', at.additional_info
+                                           ) ORDER BY at.locale)
+                                           FROM room_amenity_translations at
+                                           WHERE at.room_amenity_id=a.id
+                                             AND at.locale=ANY(%s)
+                                       )
+                                   ) ORDER BY a.id)
+                                   FROM room_amenities a WHERE a.room_type_id=r.id
+                               ), '[]'::jsonb) AS amenities
                         FROM room_types r
                         JOIN room_type_translations t
                           ON t.room_type_id=r.id AND t.locale=ANY(%s)
                         WHERE r.hotel_id=%s
-                        GROUP BY r.id, r.trip_room_id, r.max_occupancy, r.area_sqm
+                        GROUP BY r.id, r.trip_room_id, r.max_occupancy, r.area_sqm,
+                                 r.bedroom_count, r.bathroom_count, r.bed_count
                         ORDER BY r.id
                         """,
-                        (list(LOCALES), hotel_id),
+                        (list(LOCALES), list(LOCALES), hotel_id),
                     ),
                     "prices": rows(
                         cur,

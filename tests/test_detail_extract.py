@@ -10,6 +10,68 @@ from detail_extract import PARSER_VERSION, extract_detail
 
 
 class DetailExtractTests(unittest.TestCase):
+    def test_extracts_hotel_policies_from_modal_and_faq_fallback(self) -> None:
+        payloads = [
+            {
+                "url": "embedded:json-ld",
+                "response": {
+                    "@type": "FAQPage",
+                    "mainEntity": [{
+                        "name": "What is the cancellation policy?",
+                        "acceptedAnswer": {"text": "It depends on the selected room."},
+                    }],
+                },
+            },
+            {
+                "url": "embedded:hotel-policies",
+                "response": {"text": (
+                    "Check-in and check-out times\nCheck-in: After 14:00\n"
+                    "Check-out: Before 12:00\nChild policies\nChildren of all ages are welcome\n"
+                    "Pets\nPets are not allowed"
+                )},
+            },
+        ]
+        result = extract_detail(payloads, "123", "https://example.test/hotel", "USD", "en-US")
+        policies = {item["code"]: item for item in result["policies"]}
+        self.assertEqual(
+            {"checkin_checkout", "children", "pets", "cancellation"}, set(policies)
+        )
+        self.assertIn("After 14:00", policies["checkin_checkout"]["description"])
+        self.assertEqual("Pets are not allowed", policies["pets"]["description"])
+
+    def test_derives_room_and_other_categories_when_source_has_no_label(self) -> None:
+        room_url = "https://ak-d.tripcdn.com/images/room.jpg"
+        other_url = "https://ak-d.tripcdn.com/images/general.jpg"
+        payload = {
+            "data": {
+                "physicRoomMap": {
+                    "10": {
+                        "pictureInfo": [{"url": room_url}],
+                        "physicalFacilityList": [
+                            {"id": 107, "title": "Air conditioning"}
+                        ],
+                    }
+                },
+                "otherImages": [{"url": other_url}],
+                "serviceList": [{"id": 999, "name": "Mystery service"}],
+            }
+        }
+        result = extract_detail(
+            [{"url": "test", "response": payload}],
+            "123", "https://example.test/hotel", "USD", "en-US",
+        )
+        image_categories = {
+            image["url"]: {category["name"] for category in image["categories"]}
+            for image in result["images"]
+        }
+        self.assertEqual({"Rooms"}, image_categories[room_url])
+        self.assertEqual({"Other"}, image_categories[other_url])
+        amenity_categories = {
+            item["name"]: item["category"] for item in result["amenities"]
+        }
+        self.assertEqual("Room amenities", amenity_categories["Air conditioning"])
+        self.assertEqual("Other", amenity_categories["Mystery service"])
+
     def test_joins_parent_facility_category_to_amenity_items(self) -> None:
         payload = {
             "data": {
@@ -105,7 +167,22 @@ class DetailExtractTests(unittest.TestCase):
                     "10": {
                         "name": "Deluxe Room",
                         "bedInfo": {"title": "1 queen bed"},
-                        "areaInfo": {"title": "32 m2"},
+                        "areaInfo": {"title": "301 ft²"},
+                        "windowInfo": {"title": "City view"},
+                        "smokeInfo": {"title": "Non-smoking"},
+                        "wifiInfo": {"title": "Free Wi-Fi"},
+                        "floorInfo": {"title": "Floor: 2-7"},
+                        "faciltityInfo": {
+                            "list": [{
+                                "id": 20,
+                                "title": "Cleaning services",
+                                "subList": [{
+                                    "id": 606,
+                                    "title": "Daily housekeeping",
+                                    "freeType": 0,
+                                }],
+                            }],
+                        },
                         "pictureInfo": [
                             {"url": "https://ak-d.tripcdn.com/images/abc_R_960_660_R5_D.jpg"},
                             {"url": "https://ak-d.tripcdn.com/images/abc_R_200_133_R5_D.jpg"},
@@ -128,6 +205,20 @@ class DetailExtractTests(unittest.TestCase):
                         "totalPriceInfo": {"payTax": {"price": 60000}},
                     },
                 },
+                "roomPopInfo": {
+                    "10": {
+                        "id": 10,
+                        "name": "Deluxe Room",
+                        "roomBasicInfo": {
+                            "bedInfo": {
+                                "addBed": {"title": "Extra beds are available"},
+                            },
+                            "physicalFacilityList": [
+                                {"id": 92, "title": "Private bathroom"},
+                            ],
+                        },
+                    },
+                },
             }
         }
 
@@ -142,6 +233,17 @@ class DetailExtractTests(unittest.TestCase):
         self.assertEqual(850000, result["rooms"][0]["price"])
         self.assertEqual(2, result["rooms"][0]["max_occupancy"])
         self.assertFalse(result["rooms"][0]["tax_included"])
+        self.assertEqual(28.0, result["rooms"][0]["area_sqm"])
+        self.assertEqual("City view", result["rooms"][0]["view_name"])
+        self.assertEqual("Non-smoking", result["rooms"][0]["smoking_policy"])
+        self.assertEqual("Free Wi-Fi", result["rooms"][0]["wifi"])
+        self.assertEqual("Floor: 2-7", result["rooms"][0]["floor_label"])
+        self.assertEqual("Extra beds are available", result["rooms"][0]["extra_bed_policy"])
+        self.assertEqual(1, len(result["rooms"][0]["images"]))
+        self.assertEqual(
+            {"Daily housekeeping", "Private bathroom"},
+            {item["name"] for item in result["rooms"][0]["amenities"]},
+        )
         self.assertEqual(1, len(result["images"]))
 
 
