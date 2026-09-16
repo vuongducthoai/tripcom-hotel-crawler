@@ -2,7 +2,7 @@
 
 Crawl dữ liệu khách sạn từ Trip.com về PostgreSQL.
 
-- **Người thực hiện:** Vương Đức Thoại, Trịnh Quang Anh (S.AI20K)
+- **Người thực hiện:** Vương Đức Thoại, Trần Đăng Nguyên (S.AI20K)
 - **Nghiệm thu:** Nguyễn Thạch Vũ (VSF-KD&VH DLKS-PMKD)
 
 ## Báo cáo kết quả crawl dữ liệu khách sạn Trip.com
