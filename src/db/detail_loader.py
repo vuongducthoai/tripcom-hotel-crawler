@@ -180,6 +180,8 @@ def main(args: argparse.Namespace) -> None:
             for room in detail.get("rooms") or []:
                 if not room.get("trip_room_id") or not room.get("name"):
                     continue
+                room_raw = dict(room.get("raw")) if isinstance(room.get("raw"), dict) else dict(room)
+                room_raw["images"] = room.get("images") or []
                 cur.execute("""
                     INSERT INTO room_types
                         (hotel_id, trip_room_id, name, bed_type, max_occupancy, area_sqm, raw_json)
@@ -193,7 +195,7 @@ def main(args: argparse.Namespace) -> None:
                     RETURNING id
                 """, (
                     db_hotel_id, room["trip_room_id"], room["name"], room.get("bed_type"),
-                    room.get("max_occupancy"), room.get("area_sqm"), Json(room.get("raw") or room),
+                    room.get("max_occupancy"), room.get("area_sqm"), Json(room_raw),
                 ))
                 room_db_id = cur.fetchone()[0]
                 stats["rooms"] += 1
