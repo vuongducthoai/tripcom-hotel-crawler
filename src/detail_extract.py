@@ -14,7 +14,7 @@ from typing import Any, Iterator
 IMAGE_RE = re.compile(r"^https?://[^\s]+(?:\.(?:jpe?g|png|webp|avif)(?:\?|$)|tripcdn)", re.I)
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 IMAGE_VARIANT_RE = re.compile(r"_(?:R|Z)_\d+_\d+[^.]*?(?=\.(?:jpe?g|png|webp|avif)$)", re.I)
-PARSER_VERSION = 2
+PARSER_VERSION = 6
 
 
 def _walk(value: Any, path: str = "") -> Iterator[tuple[str, Any]]:
@@ -63,6 +63,121 @@ def _image_key(url: str) -> str:
     return IMAGE_VARIANT_RE.sub("", clean).casefold()
 
 
+def _add_image(
+    images: dict[str, dict], url: str, category_name: str | None = None,
+    category_code: Any = None, image_title: str | None = None,
+    category_sort: int = 0, source: str = "hotel",
+) -> None:
+    key = _image_key(url)
+    image = images.setdefault(key, {
+        "url": url,
+        "category": category_name,
+        "sort_order": len(images),
+        "categories": [],
+    })
+    if not image.get("category") and category_name:
+        image["category"] = category_name
+    if category_name:
+        code = str(category_code) if category_code is not None else category_name.casefold()
+        category = {
+            "code": code,
+            "source": source,
+            "name": category_name,
+            "image_title": image_title or None,
+            "sort_order": category_sort,
+        }
+        existing = next(
+            (item for item in image["categories"] if item.get("code") == code), None
+        )
+        if existing:
+            if not existing.get("image_title") and image_title:
+                existing["image_title"] = image_title
+            existing["sort_order"] = min(existing.get("sort_order", category_sort), category_sort)
+        else:
+            image["categories"].append(category)
+
+
+def _extract_album_images(data: Any, images: dict[str, dict]) -> None:
+    """Join ctgethotelalbum parent tabs to their nested image links."""
+    for path, value in _walk(data):
+        if not isinstance(value, dict) or not isinstance(value.get("imgTabs"), list):
+            continue
+        for tab_index, tab in enumerate(value["imgTabs"]):
+            if not isinstance(tab, dict):
+                continue
+            category_name = _first(tab, "categoryName", "pictureTypeName", "type")
+            if not isinstance(category_name, str) or not category_name.strip():
+                continue
+            category_name = " ".join(category_name.split())
+            raw_code = _first(tab, "categoryId", "pictureTypeId", "typeId", "rank")
+            source = "user" if "userprovide" in path.lower() else "hotel"
+            category_code = f"{source}:{raw_code if raw_code is not None else category_name.casefold()}"
+            image_index = 0
+            for _, candidate in _walk(tab.get("imgUrlList") or []):
+                if not isinstance(candidate, dict):
+                    continue
+                link = candidate.get("link")
+                if not isinstance(link, str) or not IMAGE_RE.search(link):
+                    continue
+                _add_image(
+                    images, link, category_name, category_code,
+                    str(candidate.get("imgTitle") or "").strip() or None,
+                    tab_index * 10000 + image_index,
+                    source,
+                )
+                image_index += 1
+
+
+def _add_amenity(
+    amenities: dict[str, dict], name: str, code: Any = None,
+    category: str | None = None, category_code: Any = None,
+) -> None:
+    clean = " ".join(name.split())
+    if not (1 < len(clean) < 160):
+        return
+    key = clean.casefold()
+    item = amenities.setdefault(key, {
+        "code": str(code) if code is not None else None,
+        "name": clean,
+        "category": category,
+        "category_code": str(category_code) if category_code is not None else None,
+    })
+    if item.get("code") is None and code is not None:
+        item["code"] = str(code)
+    if not item.get("category") and category:
+        item["category"] = category
+    if not item.get("category_code") and category_code is not None:
+        item["category_code"] = str(category_code)
+
+
+def _extract_grouped_amenities(data: Any, amenities: dict[str, dict]) -> None:
+    """Join facilityInfo.allFacilities parent groups to their child items."""
+    for path, value in _walk(data):
+        if "facilit" not in path.lower() or not isinstance(value, dict):
+            continue
+        groups = value.get("allFacilities")
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("items"), list):
+                continue
+            category = _first(group, "content", "name", "title")
+            if not isinstance(category, str) or not category.strip():
+                continue
+            clean_category = " ".join(category.split())
+            category_code = _first(group, "id", "code", "facilityId")
+            for child in group["items"]:
+                if not isinstance(child, dict):
+                    continue
+                name = _first(child, "content", "name", "title", "facilityName")
+                if not isinstance(name, str):
+                    continue
+                code = _first(child, "id", "code", "facilityId", "amenityId")
+                _add_amenity(
+                    amenities, name, code, clean_category, category_code
+                )
+
+
 def _room_id(obj: dict) -> str | None:
     value = _first(obj, "roomId", "roomID", "roomTypeId", "roomTypeID", "physicalRoomId")
     return str(value) if value is not None else None
@@ -78,7 +193,7 @@ def _parse_area(value: Any) -> float | None:
     return _number(value)
 
 
-def _rooms_from_maps(data: dict) -> dict[str, dict]:
+def _rooms_from_maps(data: dict, default_currency: str = "VND") -> dict[str, dict]:
     """Trích room từ payload dạng getHotelRoomList*Oversea.
 
     Endpoint này KHÔNG trả 1 mảng phòng phẳng — nó tách làm 2 map không
@@ -121,7 +236,7 @@ def _rooms_from_maps(data: dict) -> dict[str, dict]:
         if current is None or price < current["price"]:
             best[pid] = {
                 "price": price,
-                "currency": price_info.get("currency") or "VND",
+                "currency": price_info.get("currency") or default_currency,
                 "max_occupancy": occupancy,
                 "tax_included": tax_included,
                 "sale_room_id": str(entry.get("id")) if entry.get("id") is not None else None,
@@ -144,7 +259,7 @@ def _rooms_from_maps(data: dict) -> dict[str, dict]:
             "max_occupancy": price_entry.get("max_occupancy"),
             "area_sqm": area,
             "price": price_entry.get("price"),
-            "currency": price_entry.get("currency") or "VND",
+            "currency": price_entry.get("currency") or default_currency,
             "tax_included": price_entry.get("tax_included"),
             "raw": {
                 "physical_room": room,
@@ -154,23 +269,53 @@ def _rooms_from_maps(data: dict) -> dict[str, dict]:
     return rooms
 
 
-def extract_detail(payloads: list[dict], hotel_id: str, url: str) -> dict:
+def extract_detail(
+    payloads: list[dict], hotel_id: str, url: str, default_currency: str = "VND"
+) -> dict:
     """Chuẩn hoá toàn bộ response của một trang detail."""
     images: dict[str, dict] = {}
     amenities: dict[str, dict] = {}
     rooms: dict[str, dict] = {}
     descriptions: list[str] = []
     hotel_types: list[str] = []
+    hotel_names: list[str] = []
+    hotel_addresses: list[str] = []
 
     for packet in payloads:
         data = packet.get("response")
+
+        _extract_album_images(data, images)
+        _extract_grouped_amenities(data, amenities)
 
         # Ưu tiên join tay physicRoomMap + saleRoomMap trước — heuristic đi
         # theo tên field bên dưới không tự khớp được 2 map này (xem docstring
         # _rooms_from_maps). Payload có thể lồng trong "data" hoặc gốc.
         for candidate in (data, (data or {}).get("data") if isinstance(data, dict) else None):
             if isinstance(candidate, dict) and "physicRoomMap" in candidate:
-                rooms.update(_rooms_from_maps(candidate))
+                rooms.update(_rooms_from_maps(candidate, default_currency))
+
+        if packet.get("url") == "embedded:json-ld":
+            nodes = data if isinstance(data, list) else [data]
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                node_type = str(node.get("@type") or "").lower()
+                if node_type not in {"hotel", "lodgingbusiness", "resort"}:
+                    continue
+                if isinstance(node.get("name"), str):
+                    hotel_names.append(" ".join(node["name"].split()))
+                address = node.get("address")
+                if isinstance(address, str):
+                    hotel_addresses.append(" ".join(address.split()))
+                elif isinstance(address, dict):
+                    parts = [
+                        address.get("streetAddress"), address.get("addressLocality"),
+                        address.get("addressRegion"), address.get("postalCode"),
+                        address.get("addressCountry"),
+                    ]
+                    clean_address = ", ".join(str(part).strip() for part in parts if part)
+                    if clean_address:
+                        hotel_addresses.append(clean_address)
 
         for path, value in _walk(data):
             low_path = path.lower()
@@ -181,7 +326,7 @@ def extract_detail(payloads: list[dict], hotel_id: str, url: str) -> dict:
                     text = " ".join(value.split())
                     if len(text) >= 40:
                         descriptions.append(text)
-                if leaf in {"hoteltype", "hoteltypename", "categoryname", "propertytype"}:
+                if leaf in {"hoteltype", "hoteltypename", "accommodationtype"}:
                     text = " ".join(value.split())
                     if 1 < len(text) < 100:
                         hotel_types.append(text)
@@ -193,23 +338,19 @@ def extract_detail(payloads: list[dict], hotel_id: str, url: str) -> dict:
                 image_url = _image_url(value)
                 if image_url:
                     category = _first(value, "category", "categoryName", "typeName", "albumName")
-                    images.setdefault(_image_key(image_url), {
-                        "url": image_url,
-                        "category": str(category) if category else None,
-                        "sort_order": len(images),
-                    })
+                    _add_image(images, image_url, str(category) if category else None)
 
             if any(token in low_path for token in ("amenit", "facilit", "service")):
                 name = _first(value, "name", "title", "facilityName", "amenityName", "content")
-                if isinstance(name, str) and 1 < len(name.strip()) < 160:
+                # A dict with `items` is a facility group; its content is the
+                # parent category, not another amenity row.
+                if isinstance(name, str) and not isinstance(value.get("items"), list):
                     code = _first(value, "code", "id", "facilityId", "amenityId")
                     category = _first(value, "category", "categoryName", "groupName", "typeName")
-                    clean = " ".join(name.split())
-                    amenities.setdefault(clean.casefold(), {
-                        "code": str(code) if code is not None else None,
-                        "name": clean,
-                        "category": str(category) if category else None,
-                    })
+                    _add_amenity(
+                        amenities, name, code,
+                        str(category) if category else None,
+                    )
 
             if "room" in low_path:
                 name = _first(value, "roomName", "name", "roomTypeName", "displayName")
@@ -237,7 +378,7 @@ def extract_detail(payloads: list[dict], hotel_id: str, url: str) -> dict:
                         "max_occupancy": _integer(_first(value, "maxOccupancy", "maxGuest", "capacity")),
                         "area_sqm": _number(_first(value, "roomArea", "area", "areaSquareMeter")),
                         "price": price,
-                        "currency": str(currency or "VND"),
+                        "currency": str(currency or default_currency),
                         "tax_included": bool(tax_included) if tax_included is not None else None,
                         "raw": value,
                     })
@@ -248,6 +389,8 @@ def extract_detail(payloads: list[dict], hotel_id: str, url: str) -> dict:
         "parser_version": PARSER_VERSION,
         "trip_hotel_id": str(hotel_id),
         "url": url,
+        "name": hotel_names[0] if hotel_names else None,
+        "address": hotel_addresses[0] if hotel_addresses else None,
         "description": description,
         "hotel_type": hotel_type,
         "images": list(images.values()),

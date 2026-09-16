@@ -48,10 +48,7 @@ ON CONFLICT (trip_hotel_id) DO UPDATE SET
     is_cheap_listing = hotels.is_cheap_listing OR EXCLUDED.is_cheap_listing,
     source_url       = EXCLUDED.source_url,
     -- Import overview again without discarding detail already loaded.
-    raw_json         = EXCLUDED.raw_json ||
-                       CASE WHEN hotels.raw_json ? 'detail'
-                            THEN jsonb_build_object('detail', hotels.raw_json->'detail')
-                            ELSE '{}'::jsonb END,
+    raw_json         = COALESCE(hotels.raw_json, '{}'::jsonb) || EXCLUDED.raw_json,
     last_seen_at     = now();
 """
 
@@ -90,10 +87,25 @@ def main(args: argparse.Namespace) -> None:
     source = payload.get("source_url") or payload.get("city_name") or path.name
     city_name = payload.get("city_name")
     city_id = payload.get("city_id")
+    locale = args.locale or payload.get("locale") or "vi-VN"
+    currency = (args.currency or payload.get("currency") or "VND").upper()
     is_cheap = args.cheap or "cheap" in source.lower()
 
     with psycopg2.connect(config.dsn()) as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.hotel_translations')")
+        if cur.fetchone()[0] is None:
+            raise SystemExit("Chưa có bảng translation. Hãy chạy migrations/002_multilingual.sql trước.")
         location_id = upsert_city(cur, city_name, city_id)
+        if location_id and city_name:
+            cur.execute(
+                """
+                INSERT INTO location_translations (location_id, locale, name)
+                VALUES (%s,%s,%s)
+                ON CONFLICT (location_id, locale) DO UPDATE SET
+                    name=EXCLUDED.name, updated_at=now()
+                """,
+                (location_id, locale, city_name),
+            )
         rows, skipped = [], 0
         for h in hotels:
             hid = h.get("trip_hotel_id")
@@ -103,21 +115,21 @@ def main(args: argparse.Namespace) -> None:
             rows.append(
                 (
                     hid,
-                    h.get("name"),
-                    h.get("name_en"),
+                    h.get("name") if locale == "vi-VN" else None,
+                    h.get("name") if locale.startswith("en") else h.get("name_en"),
                     h.get("url"),
                     location_id or upsert_city(cur, h.get("city_name")),
-                    h.get("address"),
+                    h.get("address") if locale == "vi-VN" else None,
                     h.get("latitude"),
                     h.get("longitude"),
                     h.get("star_rating"),
                     as_score(h.get("review_score") if h.get("review_score") is not None else h.get("score")),
                     h.get("review_count"),
                     h.get("price_value"),
-                    h.get("currency") or "VND",
+                    h.get("currency") or currency,
                     is_cheap,
                     source,
-                    Json(h),
+                    Json(h if locale == "vi-VN" else {}),
                 )
             )
 
@@ -125,14 +137,44 @@ def main(args: argparse.Namespace) -> None:
             raise SystemExit(f"Không có bản ghi nào có trip_hotel_id trong {path.name}.")
 
         cur.execute(
-            "INSERT INTO crawl_runs (target, status) VALUES (%s, 'running') RETURNING id",
-            (source,),
+            "INSERT INTO crawl_runs (target, status, locale, currency) "
+            "VALUES (%s, 'running', %s, %s) RETURNING id",
+            (source, locale, currency),
         )
         run_id = cur.fetchone()[0]
         execute_values(
             cur, UPSERT, rows,
             template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,now())",
         )
+        translation_rows = []
+        for h in hotels:
+            if not h.get("trip_hotel_id"):
+                continue
+            translation_rows.append((
+                str(h["trip_hotel_id"]), locale, h.get("name"), h.get("address"),
+                h.get("url"), Json(h),
+            ))
+        if translation_rows:
+            execute_values(
+                cur,
+                """
+                INSERT INTO hotel_translations
+                    (hotel_id, locale, name, address, source_url, raw_json, crawled_at)
+                SELECT h.id, v.locale, v.name, v.address, v.source_url,
+                       v.raw_json::jsonb, now()
+                FROM (VALUES %s) AS v(trip_hotel_id, locale, name, address, source_url, raw_json)
+                JOIN hotels h ON h.trip_hotel_id=v.trip_hotel_id
+                ON CONFLICT (hotel_id, locale) DO UPDATE SET
+                    name=COALESCE(EXCLUDED.name, hotel_translations.name),
+                    address=COALESCE(EXCLUDED.address, hotel_translations.address),
+                    source_url=COALESCE(EXCLUDED.source_url, hotel_translations.source_url),
+                    raw_json=EXCLUDED.raw_json,
+                    crawled_at=EXCLUDED.crawled_at,
+                    updated_at=now()
+                """,
+                translation_rows,
+                template="(%s,%s,%s,%s,%s,%s)",
+            )
         cur.execute(
             "UPDATE crawl_runs SET status='success', finished_at=now(), stats=%s WHERE id=%s",
             (Json({"file": path.name, "upserted": len(rows), "skipped": skipped,
@@ -140,8 +182,11 @@ def main(args: argparse.Namespace) -> None:
         )
         cur.execute("SELECT count(*) FROM hotels")
         total = cur.fetchone()[0]
+        if args.dry_run:
+            conn.rollback()
 
-    print(f"Upsert {len(rows)} bản ghi từ {path.name} (bỏ qua {skipped} thiếu id)")
+    prefix = "DRY RUN" if args.dry_run else "Upsert"
+    print(f"{prefix} {len(rows)} bản ghi từ {path.name} (bỏ qua {skipped} thiếu id)")
     print(f"Tổng số khách sạn trong DB: {total}")
 
 
@@ -149,4 +194,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("file", nargs="?", help="file JSON trong output/data/")
     ap.add_argument("--cheap", action="store_true", help="đánh dấu is_cheap_listing")
+    ap.add_argument("--locale", help="ghi đè locale trong JSON, ví dụ en-US")
+    ap.add_argument("--currency", help="ghi đè currency trong JSON, ví dụ USD")
+    ap.add_argument("--dry-run", action="store_true", help="kiểm tra SQL rồi rollback")
     main(ap.parse_args())
