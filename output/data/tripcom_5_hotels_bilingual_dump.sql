@@ -5,7 +5,6 @@
 
 -- Schema khởi tạo cho crawler Trip.com.
 -- Chạy:  psql -h localhost -U tripcom -d tripcom -f migrations/001_init.sql
--- Hoặc tự động khi docker compose up lần đầu (file được mount vào initdb).
 
 CREATE TABLE IF NOT EXISTS locations (
     id                BIGSERIAL PRIMARY KEY,
