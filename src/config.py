@@ -36,6 +36,7 @@ TARGET_URLS: dict[str, str] = {
 # ---------------------------------------------------------------- browser
 HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
 LOCALE = os.getenv("LOCALE", "vi-VN")
+CURRENCY = os.getenv("CURRENCY", "VND")
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 VIEWPORT = {"width": 1440, "height": 900}
 PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "60000"))
@@ -76,13 +77,13 @@ RESPECT_ROBOTS = os.getenv("RESPECT_ROBOTS", "true").lower() == "true"
 # ID thật lấy từ response getCityList lúc recon — xem output/recon/bodies/008_*.
 # Thêm/bớt tuỳ phạm vi anh Vũ chốt ở Giai đoạn 0.
 VN_CITIES: list[dict] = [
-    {"id": 301, "name": "TP. Hồ Chí Minh"},
-    {"id": 286, "name": "Hà Nội"},
-    {"id": 1356, "name": "Đà Nẵng"},
-    {"id": 1777, "name": "Nha Trang"},
-    {"id": 5204, "name": "Đà Lạt"},
-    {"id": 4134, "name": "Phan Thiết"},
-    {"id": 5649, "name": "Đảo Phú Quốc"},
+    {"id": 301, "name": "TP. Hồ Chí Minh", "name_en": "Ho Chi Minh City"},
+    {"id": 286, "name": "Hà Nội", "name_en": "Hanoi"},
+    {"id": 1356, "name": "Đà Nẵng", "name_en": "Da Nang"},
+    {"id": 1777, "name": "Nha Trang", "name_en": "Nha Trang"},
+    {"id": 5204, "name": "Đà Lạt", "name_en": "Dalat"},
+    {"id": 4134, "name": "Phan Thiết", "name_en": "Phan Thiet"},
+    {"id": 5649, "name": "Đảo Phú Quốc", "name_en": "Phu Quoc Island"},
 ]
 
 # ---------------------------------------------------------------- database
@@ -100,3 +101,11 @@ def dsn() -> str:
         f"host={DB['host']} port={DB['port']} user={DB['user']} "
         f"password={DB['password']} dbname={DB['dbname']}"
     )
+
+
+def profile_dir(locale: str, currency: str) -> Path:
+    """Return an isolated browser profile for one locale/currency market."""
+    if locale == "vi-VN" and currency.upper() == "VND":
+        return PROFILE_DIR
+    safe_market = f"{locale}_{currency.upper()}".replace("/", "_").replace("\\", "_")
+    return ROOT / f"browser_profile_{safe_market}"

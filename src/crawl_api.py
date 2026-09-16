@@ -52,12 +52,14 @@ from api_extract import (
     parse_hotel,
 )
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 NOISE = re.compile(r"(google|gstatic|doubleclick|facebook|sentry|/log|/track|bee/collect)", re.I)
 HOTEL_SERVICE = "/restapi/soa2/34951/"
 LIST_ENDPOINT = "fetchHotelList"
 RECOMMEND_ENDPOINT = "fetchRecommendList"
 LIST_ENDPOINTS = (LIST_ENDPOINT, RECOMMEND_ENDPOINT)
-LIST_URL = f"https://vn.trip.com{HOTEL_SERVICE}{LIST_ENDPOINT}"
 
 # fetch() của trình duyệt tự quản lý các header này, truyền vào sẽ bị bỏ
 # qua hoặc báo lỗi — phải lọc ra khỏi mẫu bắt được.
@@ -68,9 +70,21 @@ FORBIDDEN_HEADERS = {
 }
 
 
-def build_list_url(city: dict, checkin: str, checkout: str) -> str:
+def market_host(locale: str) -> str:
+    return "www.trip.com" if locale.lower().startswith("en") else "vn.trip.com"
+
+
+def city_name_for_locale(city: dict, locale: str) -> str:
+    return (city.get("name_en") or city["name"]) if locale.lower().startswith("en") else city["name"]
+
+
+def build_list_url(
+    city: dict, checkin: str, checkout: str,
+    locale: str = "vi-VN", currency: str = "VND",
+) -> str:
     """Dựng thẳng URL trang danh sách, khỏi phải gõ ô tìm kiếm + click gợi ý."""
-    name = city["name"]
+    name = city_name_for_locale(city, locale)
+    country_name = "Vietnam" if locale.lower().startswith("en") else "Việt Nam"
     params = {
         "flexType": "1",
         "cityId": str(city["id"]),
@@ -78,7 +92,7 @@ def build_list_url(city: dict, checkin: str, checkout: str) -> str:
         "districtId": "0",
         "countryId": "111",
         "cityName": name,
-        "destName": f"{name}, Việt Nam",
+        "destName": f"{name}, {country_name}",
         "searchWord": name,
         "searchType": "CT",
         "optionId": str(city["id"]),
@@ -87,11 +101,11 @@ def build_list_url(city: dict, checkin: str, checkout: str) -> str:
         "checkout": checkout,
         "crn": "1",
         "adult": "2",
-        "curr": "VND",
-        "locale": "vi-VN",
+        "curr": currency.upper(),
+        "locale": locale,
         "old": "1",
     }
-    return "https://vn.trip.com/hotels/list?" + urllib.parse.urlencode(
+    return f"https://{market_host(locale)}/hotels/list?" + urllib.parse.urlencode(
         params, quote_via=urllib.parse.quote
     )
 
@@ -381,13 +395,18 @@ async def build_partition(
     return leaves
 
 
-def _save(city: dict, rows: list[dict], out: Path, done: bool, total) -> None:
+def _save(
+    city: dict, rows: list[dict], out: Path, done: bool, total,
+    locale: str, currency: str,
+) -> None:
     out.write_text(
         json.dumps(
             {
                 "source": LIST_ENDPOINT,
                 "city_id": city["id"],
-                "city_name": city["name"],
+                "city_name": city_name_for_locale(city, locale),
+                "locale": locale,
+                "currency": currency,
                 "crawled_at": datetime.now().isoformat(timespec="seconds"),
                 "city_total_reported": total,
                 "complete": done,
@@ -403,6 +422,7 @@ def _save(city: dict, rows: list[dict], out: Path, done: bool, total) -> None:
 async def paginate(
     page, collector, city: dict, out: Path, total, max_pages: int,
     extra_filters: list[dict] | None = None, seen: set[str] | None = None,
+    locale: str = "vi-VN", currency: str = "VND",
 ) -> set[str]:
     """Phát lại fetchHotelList, tăng dần pageIndex cho tới khi hết.
 
@@ -467,7 +487,7 @@ async def paginate(
         new = 0
         leaf_new = 0
         for entry in entries:
-            row = parse_hotel(entry, city["name"])
+            row = parse_hotel(entry, city_name_for_locale(city, locale))
             if not row:
                 continue
             hid = row["trip_hotel_id"]
@@ -504,7 +524,7 @@ async def paginate(
                   f" | tổng gộp toàn thành phố: {len(seen)}")
 
         if n % config.CHECKPOINT_EVERY == 0:
-            _save(city, dedupe(collector.rows), out, False, total)
+            _save(city, dedupe(collector.rows), out, False, total, locale, currency)
 
         if is_last_page(payload):
             if total and leaf_seen < total * 0.90:
@@ -526,30 +546,36 @@ async def paginate(
 
 async def crawl_one_city(
     ctx, city: dict, out: Path, max_pages: int, allow_recommend: bool = False,
-    target_count: int | None = None,
+    target_count: int | None = None, locale: str = "vi-VN", currency: str = "VND",
 ) -> tuple[list[dict], int | None, bool]:
     page = await ctx.new_page()
-    collector = HotelCollector(city["name"])
+    localized_city_name = city_name_for_locale(city, locale)
+    collector = HotelCollector(localized_city_name)
     page.on("response", lambda r: asyncio.create_task(collector.on_response(r)))
 
     tomorrow = datetime.now() + timedelta(days=1)
     day_after = tomorrow + timedelta(days=1)
-    url = build_list_url(city, tomorrow.strftime("%Y-%m-%d"), day_after.strftime("%Y-%m-%d"))
+    url = build_list_url(
+        city, tomorrow.strftime("%Y-%m-%d"), day_after.strftime("%Y-%m-%d"),
+        locale, currency,
+    )
 
-    print(f"\n=== {city['name']} (cityId={city['id']}) ===")
+    print(f"\n=== {localized_city_name} (cityId={city['id']}, {locale}/{currency}) ===")
     await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT_MS)
     await page.wait_for_timeout(4000)
 
     # --- Trang 1: nằm sẵn trong HTML (SSR), không đi qua API ---
     html = await page.content()
-    (config.HTML_DIR / f"list_{city['id']}.html").write_text(html, encoding="utf-8")
-    ssr_rows, meta = extract_from_html(html, city_name=city["name"])
+    market_tag = f"{locale}_{currency}".replace("-", "")
+    html_path = config.HTML_DIR / f"list_{city['id']}_{market_tag}.html"
+    html_path.write_text(html, encoding="utf-8")
+    ssr_rows, meta = extract_from_html(html, city_name=localized_city_name)
     total = meta.get("total")
     if ssr_rows:
         collector.rows.extend(ssr_rows)
         print(f"  • HTML (trang 1): {len(ssr_rows)} khách sạn | cả thành phố: {total}")
     else:
-        print(f"  ! Không bóc được dữ liệu từ HTML — xem output/html/list_{city['id']}.html")
+        print(f"  ! Không bóc được dữ liệu từ HTML — xem {html_path}")
 
     # --- Cuộn vài vòng CHỈ để bắt mẫu request (kèm token) ---
     for _ in range(8):
@@ -566,7 +592,8 @@ async def crawl_one_city(
     # đầy đủ giống thao tác người dùng thật.
     if not collector.template:
         try:
-            search_button = page.get_by_role("button", name="Tìm", exact=True)
+            button_name = "Search" if locale.lower().startswith("en") else "Tìm"
+            search_button = page.get_by_role("button", name=button_name, exact=True)
             if await search_button.count():
                 print("  • Chưa có mẫu API — kích hoạt nút Tìm trên trang…")
                 await search_button.first.click()
@@ -577,9 +604,7 @@ async def crawl_one_city(
                     await page.evaluate(SCROLL_TO_BOTTOM_JS)
                     await page.wait_for_timeout(config.SCROLL_PAUSE_MS)
                 html = await page.content()
-                (config.HTML_DIR / f"list_{city['id']}.html").write_text(
-                    html, encoding="utf-8"
-                )
+                html_path.write_text(html, encoding="utf-8")
         except Exception as e:
             print(f"    ! Không kích hoạt được nút Tìm: {e}")
 
@@ -590,7 +615,7 @@ async def crawl_one_city(
         if init_request:
             init_request.setdefault("head", {})["isSSR"] = False
             collector.template = {
-                "url": LIST_URL,
+                "url": f"https://{market_host(locale)}{HOTEL_SERVICE}{LIST_ENDPOINT}",
                 "headers": {
                     "Accept": "application/json, text/plain, */*",
                     "Content-Type": "application/json",
@@ -659,17 +684,23 @@ async def crawl_one_city(
                     before = len(seen)
                     seen = await paginate(
                         page, collector, city, out, None, max_pages,
-                        extra_filters=extra, seen=seen,
+                        extra_filters=extra, seen=seen, locale=locale, currency=currency,
                     )
                     gain = len(seen) - before
                     print(f"    ↳ mảnh {index}/{len(variants)}: +{gain}; "
                           f"tổng {len(seen)}/{goal}")
-                    _save(city, dedupe(collector.rows), out, False, expected_total)
+                    _save(
+                        city, dedupe(collector.rows), out, False, expected_total,
+                        locale, currency,
+                    )
                     if len(seen) >= goal:
                         print(f"  ✓ Đạt mục tiêu {goal} ID, dừng các lớp còn lại.")
                         break
         else:
-            await paginate(page, collector, city, out, baseline, max_pages)
+            await paginate(
+                page, collector, city, out, baseline, max_pages,
+                locale=locale, currency=currency,
+            )
     else:
         print("  ⚠ Không bắt được mẫu request fetchHotelList sau 8 vòng cuộn.")
         print(f"    Xem {collector.dump_dir} và ảnh chụp bên dưới rồi gửi lại cho em.")
@@ -692,6 +723,8 @@ async def crawl_one_city(
 
 
 async def main(args: argparse.Namespace) -> None:
+    locale = args.locale or config.LOCALE
+    currency = (args.currency or config.CURRENCY).upper()
     cities = config.VN_CITIES
     if args.city_id:
         cities = [c for c in cities if c["id"] == args.city_id]
@@ -701,27 +734,36 @@ async def main(args: argparse.Namespace) -> None:
         raise SystemExit("Không khớp thành phố nào trong config.VN_CITIES.")
 
     max_pages = args.max_pages or config.MAX_API_PAGES
+    profile_path = Path(args.profile_dir) if args.profile_dir else config.profile_dir(locale, currency)
+    if not profile_path.is_absolute():
+        profile_path = config.ROOT / profile_path
 
     async with async_playwright() as p:
         ctx = await p.chromium.launch_persistent_context(
-            user_data_dir=str(config.PROFILE_DIR),
+            user_data_dir=str(profile_path),
             headless=config.HEADLESS,
-            locale=config.LOCALE,
+            locale=locale,
             timezone_id=config.TIMEZONE,
             viewport=config.VIEWPORT,
             args=["--disable-blink-features=AutomationControlled"],
         )
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        market_tag = f"{locale}_{currency}".replace("-", "")
         for i, city in enumerate(cities):
-            out = config.DATA_DIR / f"api_hotels_{city['id']}_{stamp}.json"
+            out = config.DATA_DIR / f"api_hotels_{city['id']}_{market_tag}_{stamp}.json"
             rows, expected_total, complete = await crawl_one_city(
                 ctx, city, out, max_pages,
                 allow_recommend=args.allow_recommend,
-                target_count=args.target_count,
+                target_count=args.target_count or args.limit,
+                locale=locale,
+                currency=currency,
             )
             if rows:
-                _save(city, rows, out, complete, expected_total)
+                if args.limit:
+                    rows = rows[:args.limit]
+                    complete = len(rows) == args.limit
+                _save(city, rows, out, complete, expected_total, locale, currency)
                 print(f"  → lưu {out}")
                 print(f"    nạp DB: python src/db/loader.py {out.name}")
 
@@ -736,6 +778,10 @@ if __name__ == "__main__":
     ap.add_argument("--city", help="lọc theo tên (khớp một phần, không phân biệt hoa thường)")
     ap.add_argument("--city-id", type=int, help="chỉ chạy đúng 1 cityId")
     ap.add_argument("--max-pages", type=int, help="giới hạn số trang API (chạy thử nhanh)")
+    ap.add_argument("--locale", default=config.LOCALE, help="Trip.com locale, ví dụ vi-VN hoặc en-US")
+    ap.add_argument("--currency", default=config.CURRENCY, help="Mã tiền tệ, ví dụ VND hoặc USD")
+    ap.add_argument("--limit", type=int, help="chỉ giữ tối đa N khách sạn trong file output mẫu")
+    ap.add_argument("--profile-dir", help="profile Chromium tùy chọn; mặc định tách theo market")
     ap.add_argument(
         "--allow-recommend", action="store_true",
         help="cho phép crawl fetchRecommendList rút gọn khi profile đang đăng xuất",

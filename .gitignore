@@ -1,6 +1,7 @@
 .env
 output/
 browser_profile/
+browser_profile_*/
 __pycache__/
 *.py[cod]
 .venv/
