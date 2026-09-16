@@ -5,6 +5,56 @@ Crawl dữ liệu khách sạn từ Trip.com về PostgreSQL.
 - **Người thực hiện:** Vương Đức Thoại, Trịnh Quang Anh (S.AI20K)
 - **Nghiệm thu:** Nguyễn Thạch Vũ (VSF-KD&VH DLKS-PMKD)
 
+## Báo cáo kết quả crawl dữ liệu khách sạn Trip.com
+
+### 1. Kết quả đã thu thập
+
+- **Danh sách khách sạn (overview):** 3.431 khách sạn tại TP. Hồ Chí Minh, đã lưu vào
+  PostgreSQL. Trip.com báo tổng khoảng 6.763 kết quả cho thành phố này — dữ liệu hiện
+  tại mới đạt khoảng phân nửa, có thể chạy bổ sung để lấy đủ.
+- **Chi tiết khách sạn:** đã xử lý 609 khách sạn, trong đó 602 khách sạn có dữ liệu
+  phòng — chuẩn hóa được 3.302 loại phòng và 3.302 mức giá theo ngày nhận/trả phòng.
+- **Ảnh và tiện ích:** 87.498 ảnh và 37.872 tiện ích đã chuẩn hóa (đã loại trùng các
+  bản ảnh chỉ khác kích thước).
+
+### 2. Dữ liệu có trong từng khách sạn
+
+- Thông tin chung: tên, địa chỉ, tọa độ, hạng sao, điểm đánh giá, số lượt đánh giá,
+  giá từ, loại hình, mô tả.
+- Loại phòng và giá: tên phòng, loại giường, diện tích, sức chứa, giá theo ngày.
+- Ảnh và tiện ích đi kèm mỗi khách sạn.
+
+### 3. Công nghệ và quy trình triển khai
+
+- Dùng Python + Playwright điều khiển trình duyệt thật để lấy dữ liệu.
+- Quy trình: quét danh sách khách sạn → lấy chi tiết từng khách sạn (phòng, giá, ảnh,
+  tiện ích) → chuẩn hóa dữ liệu → nạp vào PostgreSQL (upsert, chạy lại không nhân đôi).
+- Có checkpoint, dừng/chạy tiếp giữa chừng không mất tiến độ.
+
+![Luồng hoạt động crawl dữ liệu Trip.com](docs/images/flow.png)
+
+### 4. Những vấn đề đã gặp và cách xử lý
+
+- Trip.com giới hạn mềm số kết quả → chia truy vấn theo khoảng giá và bộ lọc.
+- API báo hết trang sớm → gộp nhiều mảnh và loại trùng theo hotel ID.
+- Quá trình crawl detail kéo dài → lưu raw từng hotel và tự resume.
+- Một ảnh có nhiều kích thước → chuẩn hóa và loại biến thể trùng.
+- Import thử sai dữ liệu → bổ sung chế độ thay thế detail trong một transaction.
+
+### 5. Còn thiếu
+
+- Mới crawl TP. Hồ Chí Minh; 6 thành phố còn lại (Hà Nội, Đà Nẵng, Nha Trang, Đà Lạt,
+  Phan Thiết, Phú Quốc) chưa chạy.
+- Trang "Khách sạn giá rẻ" chưa crawl riêng.
+- Dữ liệu detail hotel TP.HCM mới đạt ~60%, cần chạy bổ sung thêm.
+
+### 6. Nguồn
+
+- **Source code:** <https://github.com/vuongducthoai/tripcom-hotel-crawler>
+- **Dữ liệu:** PostgreSQL (bảng `hotels`, `hotel_images`, `hotel_amenities`,
+  `room_types`, `hotel_prices`, `locations`) — file JSON thô/checkpoint chỉ giữ cục bộ
+  trong `output/`, không đẩy lên GitHub do dung lượng lớn.
+
 ## Ý tưởng
 
 **Phương pháp: browser automation + bắt lại API nội bộ của Trip.com.**
