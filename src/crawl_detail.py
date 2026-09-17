@@ -345,10 +345,18 @@ async def crawl_one(
         await page.close()
 
 
-def _load_cached(hotel_id: str, locale: str, currency: str) -> dict | None:
+def _load_cached(
+    hotel_id: str,
+    locale: str,
+    currency: str,
+    *,
+    allow_legacy: bool = True,
+) -> dict | None:
     path = market_raw_dir(locale, currency) / f"{hotel_id}.json"
     legacy_path = RAW_DIR / f"{hotel_id}.json"
     if (
+        allow_legacy
+        and
         not path.exists() and locale == "vi-VN" and currency.upper() == "VND"
         and legacy_path.exists()
     ):
@@ -447,7 +455,15 @@ async def main(args: argparse.Namespace) -> None:
             ) from exc
 
         for index, target in enumerate(targets, 1):
-            cached = _load_cached(target["trip_hotel_id"], locale, currency) if not args.no_resume else None
+            cached = (
+                _load_cached(
+                    target["trip_hotel_id"],
+                    locale,
+                    currency,
+                    allow_legacy=not args.ignore_legacy_cache,
+                )
+                if not args.no_resume else None
+            )
             if cached:
                 details.append(cached)
                 print(f"[{index}/{len(targets)}] cache {target['trip_hotel_id']}")
@@ -486,6 +502,14 @@ if __name__ == "__main__":
     ap.add_argument("--currency", default=config.CURRENCY, help="Mã tiền tệ, ví dụ VND hoặc USD")
     ap.add_argument("--profile-dir", help="profile Chromium tùy chọn; mặc định tách theo market")
     ap.add_argument("--no-resume", action="store_true", help="crawl lại cả hotel đã có raw thành công")
+    ap.add_argument(
+        "--ignore-legacy-cache",
+        action="store_true",
+        help=(
+            "bỏ qua raw cache VI/VND đời cũ nằm trực tiếp trong output/details/raw; "
+            "cache mới theo locale/currency vẫn được resume"
+        ),
+    )
     parsed = ap.parse_args()
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())

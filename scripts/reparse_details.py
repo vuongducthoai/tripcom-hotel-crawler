@@ -43,7 +43,7 @@ def main(args: argparse.Namespace) -> None:
     ok = 0
     changed_rooms = 0
 
-    for path in raw_files:
+    for index, path in enumerate(raw_files, 1):
         try:
             dump = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -98,6 +98,11 @@ def main(args: argparse.Namespace) -> None:
         if not args.no_update_cache:
             dump["normalized"] = base
             path.write_text(json.dumps(dump, ensure_ascii=False), encoding="utf-8")
+        if index == 1 or index % 50 == 0 or index == len(raw_files):
+            print(
+                f"  Tiến độ: {index}/{len(raw_files)} raw "
+                f"({index * 100 // len(raw_files)}%)"
+            )
 
     out = {
         "source_overview": "reparse_from_raw_cache",
