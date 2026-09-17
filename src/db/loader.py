@@ -44,6 +44,14 @@ ON CONFLICT (trip_hotel_id) DO UPDATE SET
     review_score     = COALESCE(EXCLUDED.review_score, hotels.review_score),
     review_count     = COALESCE(EXCLUDED.review_count, hotels.review_count),
     price_from       = COALESCE(EXCLUDED.price_from, hotels.price_from),
+    -- price_from and currency are one atomic market quote. The previous
+    -- loader updated only the amount, which could produce values such as
+    -- 24 USD labelled as 24 VND after importing the English overview.
+    currency         = CASE
+                           WHEN EXCLUDED.price_from IS NOT NULL
+                           THEN COALESCE(EXCLUDED.currency, hotels.currency)
+                           ELSE hotels.currency
+                       END,
     -- cờ cheap chỉ bật thêm, không tự tắt khi crawl trang khác
     is_cheap_listing = hotels.is_cheap_listing OR EXCLUDED.is_cheap_listing,
     source_url       = EXCLUDED.source_url,
