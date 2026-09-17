@@ -21,7 +21,7 @@ from psycopg2.extras import RealDictCursor
 import config
 
 
-LOCALES = ("vi-VN", "en-US")
+LANGUAGES = ("vi", "en")
 
 
 def rows(cur, query: str, params: tuple) -> list[dict]:
@@ -48,12 +48,12 @@ def main(args: argparse.Namespace) -> None:
                 FROM hotels h
                 WHERE EXISTS (
                     SELECT 1 FROM hotel_translations t
-                    WHERE t.hotel_id=h.id AND t.locale='vi-VN'
+                    WHERE t.hotel_id=h.id AND t.locale='vi'
                       AND t.raw_json IS NOT NULL
                 )
                   AND EXISTS (
                     SELECT 1 FROM hotel_translations t
-                    WHERE t.hotel_id=h.id AND t.locale='en-US'
+                    WHERE t.hotel_id=h.id AND t.locale='en'
                       AND t.raw_json IS NOT NULL
                   )
                 ORDER BY h.id
@@ -64,7 +64,7 @@ def main(args: argparse.Namespace) -> None:
             hotels = [dict(row) for row in cur.fetchall()]
             if len(hotels) < args.limit:
                 raise SystemExit(
-                    f"Chỉ có {len(hotels)}/{args.limit} hotel đủ dữ liệu vi-VN và en-US. "
+                    f"Chỉ có {len(hotels)}/{args.limit} hotel đủ dữ liệu vi và en. "
                     "Hãy crawl + import detail cả hai locale trước."
                 )
 
@@ -82,7 +82,7 @@ def main(args: argparse.Namespace) -> None:
                         WHERE hotel_id=%s AND locale=ANY(%s)
                         ORDER BY locale
                         """,
-                        (hotel_id, list(LOCALES)),
+                        (hotel_id, list(LANGUAGES)),
                     ),
                     "location_translations": rows(
                         cur,
@@ -92,7 +92,7 @@ def main(args: argparse.Namespace) -> None:
                         WHERE location_id=%s AND locale=ANY(%s)
                         ORDER BY locale
                         """,
-                        (hotel.get("location_id"), list(LOCALES)),
+                        (hotel.get("location_id"), list(LANGUAGES)),
                     ) if hotel.get("location_id") else [],
                     "images": rows(
                         cur,
@@ -118,12 +118,13 @@ def main(args: argparse.Namespace) -> None:
                         GROUP BY i.id, i.url, i.sort_order
                         ORDER BY i.sort_order, i.id
                         """,
-                        (list(LOCALES), hotel_id),
+                        (list(LANGUAGES), hotel_id),
                     ),
                     "amenities": rows(
                         cur,
                         """
                         SELECT a.id, a.amenity_code, a.free_type, a.is_highlight,
+                               (to_jsonb(a)->>'is_available')::boolean AS is_available,
                                jsonb_object_agg(t.locale, jsonb_build_object(
                                    'name', t.amenity_name, 'category', t.category,
                                    'fee_label', t.fee_label,
@@ -136,7 +137,7 @@ def main(args: argparse.Namespace) -> None:
                         GROUP BY a.id, a.amenity_code, a.free_type, a.is_highlight
                         ORDER BY a.id
                         """,
-                        (list(LOCALES), hotel_id),
+                        (list(LANGUAGES), hotel_id),
                     ),
                     "nearby_places": rows(
                         cur,
@@ -154,7 +155,7 @@ def main(args: argparse.Namespace) -> None:
                         WHERE p.hotel_id=%s
                         GROUP BY p.id ORDER BY p.sort_order, p.id
                         """,
-                        (list(LOCALES), hotel_id),
+                        (list(LANGUAGES), hotel_id),
                     ),
                     "policies": rows(
                         cur,
@@ -171,7 +172,7 @@ def main(args: argparse.Namespace) -> None:
                         GROUP BY p.id, p.policy_code, p.sort_order
                         ORDER BY p.sort_order, p.id
                         """,
-                        (list(LOCALES), hotel_id),
+                        (list(LANGUAGES), hotel_id),
                     ),
                     "room_types": rows(
                         cur,
@@ -223,20 +224,21 @@ def main(args: argparse.Namespace) -> None:
                                  r.bedroom_count, r.bathroom_count, r.bed_count
                         ORDER BY r.id
                         """,
-                        (list(LOCALES), list(LOCALES), hotel_id),
+                        (list(LANGUAGES), list(LANGUAGES), hotel_id),
                     ),
                     "prices": rows(
                         cur,
                         """
-                        SELECT DISTINCT ON (p.room_type_id, p.locale, p.currency)
+                        SELECT DISTINCT ON (p.room_type_id, p.language, p.currency, p.price_type)
                                p.room_type_id, p.check_in, p.check_out, p.price,
-                               p.currency, p.locale, p.tax_included,
+                               p.currency, p.language, p.price_type, p.tax_included,
                                p.captured_at, p.captured_date
                         FROM hotel_prices p
-                        WHERE p.hotel_id=%s AND p.locale=ANY(%s)
-                        ORDER BY p.room_type_id, p.locale, p.currency, p.captured_at DESC
+                        WHERE p.hotel_id=%s AND p.language=ANY(%s)
+                        ORDER BY p.room_type_id, p.language, p.currency,
+                                 p.price_type, p.captured_at DESC
                         """,
-                        (hotel_id, list(LOCALES)),
+                        (hotel_id, list(LANGUAGES)),
                     ),
                 }
                 result.append(item)
@@ -244,7 +246,7 @@ def main(args: argparse.Namespace) -> None:
     payload = {
         "exported_at": datetime.now().isoformat(timespec="seconds"),
         "hotel_count": len(result),
-        "locales": list(LOCALES),
+        "languages": list(LANGUAGES),
         "hotels": result,
     }
     output.write_text(

@@ -23,7 +23,9 @@ from typing import Any
 from playwright.async_api import async_playwright
 
 import config
+from db.i18n import language_key
 from detail_extract import PARSER_VERSION, extract_detail
+from hotel_facilities import capture_hotel_facilities
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -94,20 +96,58 @@ def targets_from_file(value: str | None) -> tuple[list[dict], str]:
     return targets, path.name
 
 
-def targets_from_db(locale: str = "vi-VN") -> tuple[list[dict], str]:
+def targets_from_db(
+    locale: str = "vi-VN", *, missing_only: bool = False,
+) -> tuple[list[dict], str]:
     import psycopg2
 
+    language = language_key(locale)
     with psycopg2.connect(config.dsn()) as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT h.trip_hotel_id, COALESCE(t.name, h.name), h.url, t.address
+            SELECT h.trip_hotel_id, t.name, h.url, t.address
             FROM hotels h
             LEFT JOIN hotel_translations t
               ON t.hotel_id=h.id AND t.locale=%s
             WHERE h.trip_hotel_id IS NOT NULL
+              AND (
+                %s = FALSE
+                OR (
+                  NOT EXISTS (
+                    SELECT 1
+                    FROM hotel_image_categories c
+                    JOIN hotel_images i ON i.id=c.hotel_image_id
+                    WHERE i.hotel_id=h.id AND c.locale=%s
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM hotel_amenity_translations at
+                    JOIN hotel_amenities a ON a.id=at.hotel_amenity_id
+                    WHERE a.hotel_id=h.id AND at.locale=%s
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM room_type_translations rt
+                    JOIN room_types r ON r.id=rt.room_type_id
+                    WHERE r.hotel_id=h.id AND rt.locale=%s
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM hotel_policy_translations pt
+                    JOIN hotel_policies p ON p.id=pt.hotel_policy_id
+                    WHERE p.hotel_id=h.id AND pt.locale=%s
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM hotel_nearby_place_translations nt
+                    JOIN hotel_nearby_places n ON n.id=nt.nearby_place_id
+                    WHERE n.hotel_id=h.id AND nt.locale=%s
+                  )
+                )
+              )
             ORDER BY h.id
             """,
-            (locale,),
+            (language, missing_only, language, language, language, language, language),
         )
         rows = cur.fetchall()
     return [
@@ -174,6 +214,34 @@ async def _capture_response(resp, packets: list[dict]) -> None:
         "status": resp.status,
         "response": value,
     })
+
+
+async def _wait_for_capture_quiet(
+    tasks: set[asyncio.Task],
+    packets: list[dict],
+    *,
+    min_wait_ms: int,
+    max_wait_ms: int,
+    quiet_ms: int,
+) -> None:
+    """Wait until captured API traffic settles, without always paying max_wait_ms."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    last_change = started
+    previous_count = len(packets)
+    while True:
+        await asyncio.sleep(0.1)
+        now = loop.time()
+        current_count = len(packets)
+        if current_count != previous_count:
+            previous_count = current_count
+            last_change = now
+        elapsed_ms = (now - started) * 1000
+        quiet_for_ms = (now - last_change) * 1000
+        if elapsed_ms >= max_wait_ms:
+            return
+        if elapsed_ms >= min_wait_ms and quiet_for_ms >= quiet_ms and not tasks:
+            return
 
 
 def market_raw_dir(locale: str, currency: str) -> Path:
@@ -245,11 +313,15 @@ async def crawl_one(
     page.on("response", on_response)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT_MS)
-        await page.wait_for_timeout(3500)
+        await _wait_for_capture_quiet(
+            tasks, packets, min_wait_ms=1200, max_wait_ms=3500, quiet_ms=500
+        )
         # Kích hoạt lazy-load ảnh, tiện ích và room inventory.
         for ratio in (0.35, 0.70, 1.0):
             await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {ratio})")
-            await page.wait_for_timeout(900)
+            await _wait_for_capture_quiet(
+                tasks, packets, min_wait_ms=300, max_wait_ms=900, quiet_ms=250
+            )
 
         # JSON-LD thường chứa mô tả/ảnh ngay cả khi API đổi endpoint.
         for script in await page.locator("script[type='application/ld+json']").all_text_contents():
@@ -272,6 +344,13 @@ async def crawl_one(
             packets.append({
                 "url": "embedded:page-meta", "method": "EMBEDDED", "status": 200,
                 "response": {"description": meta_description},
+            })
+
+        facilities = await capture_hotel_facilities(page)
+        if facilities:
+            packets.append({
+                "url": "embedded:hotel-facilities", "method": "EMBEDDED", "status": 200,
+                "response": facilities,
             })
 
         policy_text = await _capture_hotel_policy_text(page, locale)
@@ -401,6 +480,16 @@ def save_manifest(
     path: Path, source: str, details: list[dict], complete: bool,
     locale: str, currency: str,
 ) -> None:
+    # Full room source payloads already live in per-hotel raw captures. Keeping
+    # another copy in each checkpoint made manifests hundreds of MB.
+    compact_details = []
+    for detail in details:
+        compact = dict(detail)
+        compact["rooms"] = [
+            {key: value for key, value in room.items() if key != "raw"}
+            for room in (detail.get("rooms") or [])
+        ]
+        compact_details.append(compact)
     path.write_text(json.dumps({
         "source_overview": source,
         "locale": locale,
@@ -409,20 +498,27 @@ def save_manifest(
         "complete": complete,
         "count": len(details),
         "success_count": sum(1 for row in details if row.get("success")),
-        "details": details,
+        "details": compact_details,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def main(args: argparse.Namespace) -> None:
     locale = args.locale or config.LOCALE
     currency = (args.currency or config.CURRENCY).upper()
-    targets, source = targets_from_db(locale) if args.from_db else targets_from_file(args.file)
+    targets, source = (
+        targets_from_db(locale, missing_only=args.missing_only)
+        if args.from_db else targets_from_file(args.file)
+    )
     if args.start_after:
         targets = [t for t in targets if int(t["trip_hotel_id"]) > args.start_after]
     if args.limit:
         targets = targets[:args.limit]
     if not targets:
         raise SystemExit("Không có hotel nào để crawl detail.")
+    if args.workers < 1 or args.workers > 4:
+        raise SystemExit("--workers phải từ 1 đến 4; khuyến nghị 2.")
+    if args.max_consecutive_errors < 1:
+        raise SystemExit("--max-consecutive-errors phải lớn hơn 0.")
 
     tomorrow = datetime.now() + timedelta(days=1)
     checkin = args.checkin or tomorrow.strftime("%Y-%m-%d")
@@ -430,23 +526,31 @@ async def main(args: argparse.Namespace) -> None:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     market_tag = f"{locale}_{currency}".replace("-", "")
     out = config.DATA_DIR / f"hotel_details_{market_tag}_{stamp}.json"
-    details: list[dict] = []
+    detail_slots: list[dict | None] = [None] * len(targets)
 
-    print(f"Detail: {len(targets)} hotel | {locale}/{currency} | {checkin} → {checkout}")
+    print(
+        f"Detail: {len(targets)} hotel | {locale}/{currency} | "
+        f"{checkin} → {checkout} | workers={args.workers}"
+    )
     print("Không chạy song song với crawl_api.py (dùng chung browser_profile).")
 
     async with async_playwright() as p:
         profile_path = Path(args.profile_dir) if args.profile_dir else config.profile_dir(locale, currency)
         if not profile_path.is_absolute():
             profile_path = config.ROOT / profile_path
+        launch_options = {
+            "headless": config.HEADLESS,
+            "locale": locale,
+            "timezone_id": config.TIMEZONE,
+            "viewport": config.VIEWPORT,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if args.browser_channel:
+            launch_options["channel"] = args.browser_channel
         try:
             ctx = await p.chromium.launch_persistent_context(
                 user_data_dir=str(profile_path),
-                headless=config.HEADLESS,
-                locale=locale,
-                timezone_id=config.TIMEZONE,
-                viewport=config.VIEWPORT,
-                args=["--disable-blink-features=AutomationControlled"],
+                **launch_options,
             )
         except Exception as exc:
             raise SystemExit(
@@ -454,6 +558,14 @@ async def main(args: argparse.Namespace) -> None:
                 f"Chi tiết: {exc}"
             ) from exc
 
+        async def block_heavy_resources(route) -> None:
+            if route.request.resource_type in {"image", "media", "font"}:
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await ctx.route("**/*", block_heavy_resources)
+        pending: list[tuple[int, dict]] = []
         for index, target in enumerate(targets, 1):
             cached = (
                 _load_cached(
@@ -465,25 +577,68 @@ async def main(args: argparse.Namespace) -> None:
                 if not args.no_resume else None
             )
             if cached:
-                details.append(cached)
+                detail_slots[index - 1] = cached
                 print(f"[{index}/{len(targets)}] cache {target['trip_hotel_id']}")
                 continue
-            row = await crawl_one(ctx, target, checkin, checkout, locale, currency)
-            details.append(row)
-            print(
-                f"[{index}/{len(targets)}] {target['trip_hotel_id']} "
-                f"{'OK' if row.get('success') else 'LỖI'} | "
-                f"ảnh={len(row.get('images') or [])}, "
-                f"tiện ích={len(row.get('amenities') or [])}, "
-                f"phòng={len(row.get('rooms') or [])}"
-            )
-            if index % config.CHECKPOINT_EVERY == 0:
-                save_manifest(out, source, details, False, locale, currency)
-                print(f"  checkpoint → {out}")
-            await asyncio.sleep(random.uniform(config.MIN_DELAY, config.MAX_DELAY))
+            pending.append((index, target))
+
+        queue: asyncio.Queue[tuple[int, dict]] = asyncio.Queue()
+        for job in pending:
+            queue.put_nowait(job)
+        crawled_count = 0
+        consecutive_errors = 0
+
+        async def worker() -> None:
+            nonlocal crawled_count, consecutive_errors
+            while True:
+                try:
+                    index, target = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    row = await crawl_one(
+                        ctx, target, checkin, checkout, locale, currency
+                    )
+                    detail_slots[index - 1] = row
+                    crawled_count += 1
+                    if row.get("success"):
+                        consecutive_errors = 0
+                    else:
+                        consecutive_errors += 1
+                    print(
+                        f"[{index}/{len(targets)}] {target['trip_hotel_id']} "
+                        f"{'OK' if row.get('success') else 'LỖI'} | "
+                        f"ảnh={len(row.get('images') or [])}, "
+                        f"tiện ích={len(row.get('amenities') or [])}, "
+                        f"phòng={len(row.get('rooms') or [])}"
+                    )
+                    if crawled_count % config.CHECKPOINT_EVERY == 0:
+                        checkpoint = [
+                            value for value in detail_slots if value is not None
+                        ]
+                        save_manifest(
+                            out, source, checkpoint, False, locale, currency
+                        )
+                        print(f"  checkpoint → {out}")
+                    if consecutive_errors >= args.max_consecutive_errors:
+                        print(
+                            f"Dừng an toàn: {consecutive_errors} hotel liên tiếp lỗi; "
+                            "hãy kiểm tra profile hoặc mã chống crawler trước khi chạy tiếp."
+                        )
+                        return
+                    await asyncio.sleep(
+                        random.uniform(config.MIN_DELAY, config.MAX_DELAY)
+                    )
+                finally:
+                    queue.task_done()
+
+        worker_count = min(args.workers, len(pending))
+        if worker_count:
+            await asyncio.gather(*(worker() for _ in range(worker_count)))
 
         await ctx.close()
 
+    details = [value for value in detail_slots if value is not None]
     success = sum(1 for row in details if row.get("success"))
     save_manifest(out, source, details, success == len(details), locale, currency)
     print(f"→ {success}/{len(details)} detail thành công → {out}")
@@ -494,6 +649,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="file overview api_hotels_*.json; mặc định file mới nhất")
     ap.add_argument("--from-db", action="store_true", help="đọc danh sách hotel từ PostgreSQL")
+    ap.add_argument(
+        "--missing-only", action="store_true",
+        help="với --from-db, chỉ crawl hotel chưa có detail theo ngôn ngữ",
+    )
     ap.add_argument("--limit", type=int, help="chỉ crawl N hotel đầu (nên dùng 1 để kiểm thử)")
     ap.add_argument("--start-after", type=int, help="chỉ lấy trip_hotel_id lớn hơn giá trị này")
     ap.add_argument("--checkin", help="YYYY-MM-DD")
@@ -501,7 +660,19 @@ if __name__ == "__main__":
     ap.add_argument("--locale", default=config.LOCALE, help="Trip.com locale, ví dụ vi-VN hoặc en-US")
     ap.add_argument("--currency", default=config.CURRENCY, help="Mã tiền tệ, ví dụ VND hoặc USD")
     ap.add_argument("--profile-dir", help="profile Chromium tùy chọn; mặc định tách theo market")
+    ap.add_argument(
+        "--browser-channel", choices=("chrome", "msedge"),
+        help="dùng trình duyệt hệ thống thay cho Chrome for Testing",
+    )
     ap.add_argument("--no-resume", action="store_true", help="crawl lại cả hotel đã có raw thành công")
+    ap.add_argument(
+        "--workers", type=int, default=1,
+        help="số hotel crawl song song (1-4, khuyến nghị 2)",
+    )
+    ap.add_argument(
+        "--max-consecutive-errors", type=int, default=5,
+        help="tự dừng worker sau N hotel liên tiếp lỗi (mặc định 5)",
+    )
     ap.add_argument(
         "--ignore-legacy-cache",
         action="store_true",

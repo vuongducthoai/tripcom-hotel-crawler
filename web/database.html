@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database Inspector · Trip.com Crawl</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" style="color:inherit;text-decoration:none">
+        <div class="brand-icon">DB</div>
+        <div><strong>PostgreSQL</strong><span>Data Inspector</span></div>
+      </a>
+      <div class="sidebar-label">TABLES</div>
+      <nav id="table-list" class="table-list" aria-label="Danh sách bảng"></nav>
+      <div class="sidebar-footer"><div class="connection-dot"></div><div><strong>Read-only</strong><span>PostgreSQL local</span></div></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><h1>Database Inspector</h1><p>Kiểm tra toàn bộ bảng và trường dữ liệu trong PostgreSQL</p></div>
+        <div class="topbar-actions"><a class="button secondary" href="/" style="text-decoration:none">← Danh sách khách sạn</a><div id="db-status" class="db-status"><span></span>Đang kết nối...</div><button id="refresh-schema" class="icon-button" title="Làm mới schema">↻</button></div>
+      </header>
+      <section class="toolbar" aria-label="Bộ lọc dữ liệu">
+        <label class="search-box"><span>⌕</span><input id="search-input" type="search" placeholder="Tìm kiếm trong bảng..." autocomplete="off"></label>
+        <select id="locale-filter" class="control hidden" aria-label="Lọc ngôn ngữ"></select>
+        <select id="null-column" class="control" aria-label="Chọn cột kiểm tra NULL"><option value="">Tất cả dữ liệu</option></select>
+        <select id="null-mode" class="control" aria-label="Trạng thái NULL" disabled><option value="null">Chỉ giá trị NULL</option><option value="not_null">Chỉ có dữ liệu</option></select>
+        <button id="clear-filters" class="button secondary">Xóa bộ lọc</button><button id="export-json" class="button primary">⇩ Xuất JSON</button>
+      </section>
+      <section class="content-grid">
+        <div class="data-card">
+          <div class="card-heading"><div><div class="eyebrow">BẢNG ĐANG XEM</div><h2 id="table-title">Đang tải...</h2><p id="table-description">Đọc schema và dữ liệu từ PostgreSQL</p></div><div id="record-total" class="record-total">— bản ghi</div></div>
+          <div id="stats-strip" class="stats-strip skeleton-line"></div><div id="error-banner" class="error-banner hidden"></div>
+          <div class="grid-wrap"><table class="data-table"><thead id="data-head"></thead><tbody id="data-body"></tbody></table><div id="loading" class="loading"><div class="spinner"></div><span>Đang tải dữ liệu...</span></div><div id="empty-state" class="empty-state hidden">Không có bản ghi phù hợp.</div></div>
+          <footer class="pagination"><div class="page-size">Hiển thị <select id="page-size"><option>25</option><option selected>50</option><option>100</option><option>200</option></select> bản ghi/trang</div><div id="page-summary">—</div><div class="page-buttons"><button id="prev-page" class="icon-button">‹</button><span id="page-number">1</span><button id="next-page" class="icon-button">›</button></div></footer>
+        </div>
+        <aside id="inspector" class="inspector">
+          <div class="inspector-heading"><div><span class="eyebrow">BẢN GHI</span><h2>Chi tiết bản ghi</h2></div><button id="close-inspector" class="icon-button">×</button></div>
+          <div class="tabs"><button class="tab active" data-tab="data">Dữ liệu</button><button class="tab" data-tab="relations">Quan hệ <span id="relation-count"></span></button><button class="tab" data-tab="json">Raw JSON</button></div>
+          <div id="inspector-placeholder" class="inspector-placeholder"><div class="placeholder-icon">↖</div><strong>Chọn một bản ghi</strong><span>Nhấp vào một hàng để xem đầy đủ giá trị và quan hệ.</span></div>
+          <div id="tab-data" class="tab-panel hidden"></div><div id="tab-relations" class="tab-panel hidden"></div><div id="tab-json" class="tab-panel hidden"><pre id="json-view"></pre></div>
+        </aside>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast"></div><script src="/assets/app.js" defer></script>
+</body>
+</html>

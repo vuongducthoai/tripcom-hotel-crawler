@@ -14,7 +14,7 @@ from typing import Any, Iterator
 IMAGE_RE = re.compile(r"^https?://[^\s]+(?:\.(?:jpe?g|png|webp|avif)(?:\?|$)|tripcdn)", re.I)
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 IMAGE_VARIANT_RE = re.compile(r"_(?:R|Z)_\d+_\d+[^.]*?(?=\.(?:jpe?g|png|webp|avif)$)", re.I)
-PARSER_VERSION = 10
+PARSER_VERSION = 15
 
 POLICY_HEADINGS = {
     "checkin_checkout": (
@@ -59,6 +59,24 @@ def _number(value: Any) -> float | None:
 def _integer(value: Any) -> int | None:
     number = _number(value)
     return int(number) if number is not None else None
+
+
+def _boolean(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        clean = value.strip().casefold()
+        if clean in {"true", "1", "yes"}:
+            return True
+        if clean in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _highlight_value(item: dict) -> bool | None:
+    return _boolean(_first(item, "isHighLight", "isHighlight", "highLight", "highlight"))
 
 
 def _image_url(obj: dict) -> str | None:
@@ -150,6 +168,7 @@ def _add_amenity(
     category_priority: int = 0, free_type: Any = None,
     fee_label: str | None = None, additional_info: Any = None,
     is_highlight: Any = None,
+    is_available: Any = None,
 ) -> None:
     clean = " ".join(name.split())
     if not (1 < len(clean) < 160):
@@ -164,7 +183,8 @@ def _add_amenity(
         "free_type": _integer(free_type),
         "fee_label": fee_label,
         "additional_info": additional_info or [],
-        "is_highlight": is_highlight,
+        "is_highlight": _boolean(is_highlight),
+        "is_available": _boolean(is_available),
     })
     if item.get("code") is None and code is not None:
         item["code"] = str(code)
@@ -174,16 +194,26 @@ def _add_amenity(
         item["_category_priority"] = category_priority
     if item.get("free_type") is None:
         item["free_type"] = _integer(free_type)
+    if item.get("is_highlight") is None:
+        item["is_highlight"] = _boolean(is_highlight)
+    if item.get("is_available") is None:
+        item["is_available"] = _boolean(is_available)
     if not item.get("fee_label") and fee_label:
         item["fee_label"] = fee_label
     if not item.get("additional_info") and additional_info:
         item["additional_info"] = additional_info
 
 
+def _is_room_facility_path(path: str) -> bool:
+    return any(token in path.lower() for token in (
+        "room", "physicalfacility", "newphysicalfacility", "faciltityinfo",
+    ))
+
+
 def _extract_grouped_amenities(data: Any, amenities: dict[str, dict]) -> None:
     """Join facilityInfo.allFacilities parent groups to their child items."""
     for path, value in _walk(data):
-        if "facilit" not in path.lower() or not isinstance(value, dict):
+        if "facilit" not in path.lower() or _is_room_facility_path(path) or not isinstance(value, dict):
             continue
         groups = value.get("allFacilities")
         if not isinstance(groups, list):
@@ -207,7 +237,7 @@ def _extract_grouped_amenities(data: Any, amenities: dict[str, dict]) -> None:
                     amenities, name, code, clean_category, category_code, 100,
                     child.get("freeType"),
                     _first(child, "feeLabel", "chargeDesc", "priceDesc"),
-                    child.get("additionInfo"), child.get("isHighLight"),
+                    child.get("additionInfo"), _highlight_value(child),
                 )
 
 
@@ -280,6 +310,30 @@ def _info_text(value: Any) -> str | None:
     else:
         text = None
     return " ".join(str(text).split()) if text else None
+
+
+def _bed_type_text(value: Any) -> str | None:
+    """Return the localized bed label from simple or complex Trip room data."""
+    direct = _info_text(value)
+    if direct:
+        return direct
+    if not isinstance(value, dict):
+        return None
+    complex_bed = value.get("complexBed") or value.get("cpxBedInfo") or {}
+    if not isinstance(complex_bed, dict):
+        return None
+    parts: list[str] = []
+    for room in complex_bed.get("content") or complex_bed.get("bedDetail") or []:
+        if not isinstance(room, dict):
+            continue
+        details = room.get("detail") or []
+        if isinstance(details, str):
+            details = [details]
+        for detail in details:
+            clean = " ".join(str(detail or "").split())
+            if clean and clean not in parts:
+                parts.append(clean)
+    return "; ".join(parts) or None
 
 
 def _policy_code(text: str) -> str | None:
@@ -397,7 +451,7 @@ def _extract_room_amenities(source: dict) -> list[dict]:
             "name": name,
             "category": category,
             "category_code": str(category_code) if category_code is not None else None,
-            "is_highlight": item.get("isHighLight"),
+            "is_highlight": _highlight_value(item),
             "free_type": _integer(item.get("freeType")),
             "additional_info": item.get("additionInfo") or [],
         })
@@ -448,6 +502,7 @@ def _enrich_room(result: dict, source: dict) -> None:
     bed_info = basic.get("bedInfo") or source.get("bedInfo") or {}
     house = source.get("houseTypeInfo") or {}
 
+    result["bed_type"] = _bed_type_text(bed_info) or result.get("bed_type")
     result["area_sqm"] = _parse_area(basic.get("areaInfo") or source.get("areaInfo")) or result.get("area_sqm")
     result["view_name"] = (
         _info_text(basic.get("windowInfo"))
@@ -546,7 +601,7 @@ def _rooms_from_maps(data: dict, default_currency: str = "VND") -> dict[str, dic
         name = room.get("name")
         if not isinstance(name, str) or not name.strip():
             continue
-        bed = (room.get("bedInfo") or {}).get("title")
+        bed = _bed_type_text(room.get("bedInfo"))
         area = _parse_area((room.get("areaInfo") or {}).get("title"))
         price_entry = best.get(str(rid)) or {}
         rooms[str(rid)] = {
@@ -620,15 +675,26 @@ def extract_detail(
     popular_amenity_category = "Popular amenities" if is_english else "Tiện ích phổ biến"
     other_category = "Other" if is_english else "Khác"
 
+    captured_facilities = next((packet.get("response") for packet in payloads
+        if packet.get("url") == "embedded:hotel-facilities"
+        and isinstance(packet.get("response"), dict)
+        and packet["response"].get("captured")
+        and packet["response"].get("items")), None)
+
     for packet in payloads:
         data = packet.get("response")
+        packet_url = str(packet.get("url") or "").lower()
+        room_packet = any(token in packet_url for token in (
+            "getroom", "roomlist", "roompop", "roomdetail", "room-facilities",
+        ))
 
         if packet.get("url") == "embedded:hotel-policies" and isinstance(data, dict):
             for policy in _extract_modal_policies(str(data.get("text") or "")):
                 policies[policy["code"]] = policy
 
         _extract_album_images(data, images)
-        _extract_grouped_amenities(data, amenities)
+        if not captured_facilities and not room_packet:
+            _extract_grouped_amenities(data, amenities)
         for place in _extract_nearby_places(data):
             nearby_places[place["trip_poi_id"]] = place
 
@@ -653,16 +719,26 @@ def extract_detail(
                 node_type = str(node.get("@type") or "").lower()
                 if node_type not in {"hotel", "lodgingbusiness", "resort"}:
                     continue
+                type_labels = {
+                    "hotel": "Hotel" if is_english else "Khách sạn",
+                    "resort": "Resort" if is_english else "Khu nghỉ dưỡng",
+                    "lodgingbusiness": (
+                        "Lodging business" if is_english else "Cơ sở lưu trú"
+                    ),
+                }
+                hotel_types.append(type_labels[node_type])
                 if isinstance(node.get("name"), str):
                     hotel_names.append(" ".join(node["name"].split()))
                 address = node.get("address")
                 if isinstance(address, str):
                     hotel_addresses.append(" ".join(address.split()))
                 elif isinstance(address, dict):
-                    parts = [
-                        address.get("streetAddress"), address.get("addressLocality"),
-                        address.get("addressRegion"), address.get("postalCode"),
-                        address.get("addressCountry"),
+                    # Trip's streetAddress commonly already contains locality
+                    # and region. Appending them again produces duplicated text.
+                    street = address.get("streetAddress")
+                    parts = [street] if street else [
+                        address.get("addressLocality"), address.get("addressRegion"),
+                        address.get("postalCode"), address.get("addressCountry"),
                     ]
                     clean_address = ", ".join(str(part).strip() for part in parts if part)
                     if clean_address:
@@ -675,7 +751,20 @@ def extract_detail(
                 leaf = low_path.rsplit(".", 1)[-1]
                 if leaf in {"description", "hoteldescription", "descriptiontext", "introduction"}:
                     text = " ".join(value.split())
-                    if len(text) >= 40:
+                    generic_markers = (
+                        "bạn đang tìm đặt phòng",
+                        "hãy chọn phòng cho bạn",
+                        "so sánh giá cả và đặt",
+                        "chúng tôi khuyên bạn nên đặt",
+                        "phải thanh toán thêm",
+                        "looking to book",
+                        "select rooms",
+                        "compare prices and book",
+                        "compare the latest room rates",
+                    )
+                    if len(text) >= 40 and not any(
+                        marker in text.casefold() for marker in generic_markers
+                    ):
                         descriptions.append(text)
                 if leaf in {"hoteltype", "hoteltypename", "accommodationtype"}:
                     text = " ".join(value.split())
@@ -708,7 +797,8 @@ def extract_detail(
                             fallback=True,
                         )
 
-            if any(token in low_path for token in ("amenit", "facilit", "service")):
+            if (not captured_facilities and not room_packet and not _is_room_facility_path(low_path)
+                    and any(token in low_path for token in ("amenit", "facilit", "service"))):
                 name = _first(value, "name", "title", "facilityName", "amenityName", "content")
                 # A dict with `items` is a facility group; its content is the
                 # parent category, not another amenity row.
@@ -738,7 +828,7 @@ def extract_detail(
                         str(category) if category else None,
                         category_code, category_priority, value.get("freeType"),
                         _first(value, "feeLabel", "chargeDesc", "priceDesc"),
-                        value.get("additionInfo"), value.get("isHighLight"),
+                        value.get("additionInfo"), _highlight_value(value),
                     )
 
             if "room" in low_path:
@@ -747,8 +837,7 @@ def extract_detail(
                 if isinstance(name, str) and (rid or any(k in value for k in ("bedType", "roomArea", "maxOccupancy"))):
                     clean_name = " ".join(name.split())
                     bed = _first(value, "bedType", "bedName", "bedDesc", "bedInfo")
-                    if isinstance(bed, dict):
-                        bed = _first(bed, "name", "description", "text")
+                    bed = _bed_type_text(bed) if isinstance(bed, dict) else bed
                     room_key = rid or _stable_room_id(clean_name, str(bed) if bed else None)
                     price_obj = _first(value, "priceInfo", "price", "salePrice")
                     currency = _first(value, "currency", "currencyCode")
@@ -782,10 +871,26 @@ def extract_detail(
             if isinstance(candidate, dict):
                 _merge_room_popups(rooms, candidate)
 
+    if captured_facilities:
+        amenities.clear()
+        for item in captured_facilities["items"]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                continue
+            _add_amenity(amenities, item["name"], code=item.get("code"),
+                         category=item.get("category") or other_category,
+                         category_code=item.get("category_code"),
+                         category_priority=100 if item.get("category") else 1,
+                         fee_label=item.get("fee_label"), additional_info=item.get("additional_info"),
+                         is_highlight=item.get("is_highlight"), is_available=item.get("is_available"))
+            key = " ".join(item["name"].split()).casefold()
+            if item.get("is_highlight") and key in amenities:
+                amenities[key]["is_highlight"] = True
+
     description = max(descriptions, key=len) if descriptions else None
     hotel_type = hotel_types[0] if hotel_types else None
     return {
         "parser_version": PARSER_VERSION,
+        "hotel_amenities_captured": bool(captured_facilities),
         "trip_hotel_id": str(hotel_id),
         "url": url,
         "name": hotel_names[0] if hotel_names else None,

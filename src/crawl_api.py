@@ -399,6 +399,7 @@ def _save(
     city: dict, rows: list[dict], out: Path, done: bool, total,
     locale: str, currency: str,
 ) -> None:
+    captured = datetime.now()
     out.write_text(
         json.dumps(
             {
@@ -407,7 +408,9 @@ def _save(
                 "city_name": city_name_for_locale(city, locale),
                 "locale": locale,
                 "currency": currency,
-                "crawled_at": datetime.now().isoformat(timespec="seconds"),
+                "check_in": (captured + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "check_out": (captured + timedelta(days=2)).strftime("%Y-%m-%d"),
+                "crawled_at": captured.isoformat(timespec="seconds"),
                 "city_total_reported": total,
                 "complete": done,
                 "count": len(rows),

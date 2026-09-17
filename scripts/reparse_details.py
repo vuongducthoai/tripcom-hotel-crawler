@@ -74,7 +74,9 @@ def main(args: argparse.Namespace) -> None:
         base["currency"] = currency
         base["name"] = fresh.get("name") or base.get("name") or target.get("name")
         base["address"] = fresh.get("address") or base.get("address") or target.get("address")
-        base["description"] = fresh["description"] or base.get("description")
+        # Do not resurrect SEO/booking text accepted by an older parser.
+        # A missing verified description is intentionally stored as NULL.
+        base["description"] = fresh["description"]
         # Do not retain values produced by an older parser. In particular,
         # parser v4 and earlier could mistake image/promotion categoryName for
         # the property's hotel_type.
@@ -83,7 +85,13 @@ def main(args: argparse.Namespace) -> None:
         base["amenities"] = fresh["amenities"]
         base["policies"] = fresh["policies"]
         base["nearby_places"] = fresh["nearby_places"]
-        base["rooms"] = fresh["rooms"]
+        # Full room source payloads remain in the raw capture. Do not retain a
+        # second copy in memory/manifest; on a city-sized reparse this can use
+        # several GB of RAM without adding normalized data.
+        base["rooms"] = [
+            {key: value for key, value in room.items() if key != "raw"}
+            for room in fresh["rooms"]
+        ]
         base["response_count"] = fresh["response_count"]
         base["parser_version"] = fresh["parser_version"]
         base.setdefault("success", True)
@@ -101,7 +109,8 @@ def main(args: argparse.Namespace) -> None:
         if index == 1 or index % 50 == 0 or index == len(raw_files):
             print(
                 f"  Tiến độ: {index}/{len(raw_files)} raw "
-                f"({index * 100 // len(raw_files)}%)"
+                f"({index * 100 // len(raw_files)}%)",
+                flush=True,
             )
 
     out = {

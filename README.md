@@ -186,6 +186,21 @@ python scripts/reparse_details.py
 python src/db/detail_loader.py
 ```
 
+### 5. Xem và demo toàn bộ dữ liệu PostgreSQL
+
+Web demo chạy cục bộ, trang chính hiển thị danh sách khách sạn đã crawl và cho phép mở
+chi tiết theo từng phân mục: tổng quan, VI/EN, phòng, giá, ảnh, tiện nghi, chính sách,
+vị trí lân cận và raw JSON. Trang `/database.html` là Database Inspector, tự đọc schema
+`public` để kiểm tra tất cả bảng/cột, lọc `NULL`, sắp xếp và xuất JSON. Mọi kết nối của
+web đều ở chế độ **read-only**, không sửa dữ liệu và có thể chạy cùng lúc với crawler.
+
+```powershell
+.\.venv\Scripts\python.exe src\web_app.py
+```
+
+Sau đó mở <http://127.0.0.1:8000>; Database Inspector nằm tại
+<http://127.0.0.1:8000/database.html>. Nhấn `Ctrl+C` tại terminal chạy web để dừng.
+
 ## Cấu trúc
 
 ```

@@ -10,6 +10,34 @@ from detail_extract import PARSER_VERSION, extract_detail
 
 
 class DetailExtractTests(unittest.TestCase):
+    def test_extracts_property_identity_without_duplicate_address_or_seo_text(self) -> None:
+        result = extract_detail(
+            [{
+                "url": "embedded:json-ld",
+                "response": {
+                    "@type": "Hotel",
+                    "name": "Khách sạn mẫu",
+                    "address": {
+                        "streetAddress": "6E Tú Xương, Phường Võ Thị Sáu, TP. Hồ Chí Minh",
+                        "addressLocality": "6E Tú Xương, Phường Võ Thị Sáu",
+                        "addressRegion": "TP. Hồ Chí Minh",
+                        "addressCountry": "Việt Nam",
+                    },
+                    "description": (
+                        "Bạn đang tìm đặt phòng Khách sạn mẫu? Hãy chọn phòng cho bạn, "
+                        "so sánh giá cả và đặt kỳ nghỉ hoàn hảo ngay trên Trip.com!"
+                    ),
+                },
+            }],
+            "123", "https://example.test/hotel", "VND", "vi-VN",
+        )
+        self.assertEqual("Khách sạn", result["hotel_type"])
+        self.assertEqual(
+            "6E Tú Xương, Phường Võ Thị Sáu, TP. Hồ Chí Minh",
+            result["address"],
+        )
+        self.assertIsNone(result["description"])
+
     def test_extracts_hotel_policies_from_modal_and_faq_fallback(self) -> None:
         payloads = [
             {
@@ -69,8 +97,25 @@ class DetailExtractTests(unittest.TestCase):
         amenity_categories = {
             item["name"]: item["category"] for item in result["amenities"]
         }
-        self.assertEqual("Room amenities", amenity_categories["Air conditioning"])
+        self.assertNotIn("Air conditioning", amenity_categories)
         self.assertEqual("Other", amenity_categories["Mystery service"])
+
+    def test_rendered_property_facilities_override_room_and_heuristic_items(self):
+        result = extract_detail([
+            {"url": "test", "response": {"serviceList": [{"name": "Wrong service"}],
+                "physicRoomMap": {"10": {"physicalFacilityList": [{"title": "30 m²"}]}}}},
+            {"url": "embedded:hotel-facilities", "response": {"captured": True, "items": [
+                {"name": "Gym", "category": "Wellness", "is_highlight": False},
+                {"name": "Gym", "is_highlight": True},
+                {"name": "Laundry", "category": "Cleaning", "fee_label": "Additional charge"},
+            ]}},
+        ], "123", "https://example.test", "USD", "en-US")
+        items = {item["name"]: item for item in result["amenities"]}
+        self.assertEqual({"Gym", "Laundry"}, set(items))
+        self.assertEqual("Wellness", items["Gym"]["category"])
+        self.assertTrue(items["Gym"]["is_highlight"])
+        self.assertEqual("Additional charge", items["Laundry"]["fee_label"])
+        self.assertTrue(result["hotel_amenities_captured"])
 
     def test_joins_parent_facility_category_to_amenity_items(self) -> None:
         payload = {
@@ -90,7 +135,7 @@ class DetailExtractTests(unittest.TestCase):
             }
         }
         result = extract_detail(
-            [{"url": "room-facilities", "response": payload}],
+            [{"url": "hotel-facilities", "response": payload}],
             "123", "https://example.test/hotel",
         )
         self.assertEqual(2, len(result["amenities"]))
@@ -159,6 +204,40 @@ class DetailExtractTests(unittest.TestCase):
             "Ngoại thất khách sạn",
             next(item for item in categories if item["code"] == "hotel:1")["image_title"],
         )
+
+    def test_normalizes_amenity_highlight_key_variants(self) -> None:
+        payload = {
+            "facilityInfo": {
+                "allFacilities": [{
+                    "id": 10,
+                    "content": "Popular facilities",
+                    "items": [
+                        {
+                            "id": 101,
+                            "content": "Parking",
+                            "freeType": "0",
+                            "isHighlight": "true",
+                        },
+                        {
+                            "id": 102,
+                            "content": "Airport pickup",
+                            "freeType": 2,
+                            "highLight": False,
+                        },
+                    ],
+                }],
+            },
+        }
+
+        result = extract_detail(
+            [{"url": "getFacility", "response": payload}],
+            "123", "https://example.test/hotel",
+        )
+        amenities = {item["name"]: item for item in result["amenities"]}
+        self.assertEqual(0, amenities["Parking"]["free_type"])
+        self.assertIs(True, amenities["Parking"]["is_highlight"])
+        self.assertEqual(2, amenities["Airport pickup"]["free_type"])
+        self.assertIs(False, amenities["Airport pickup"]["is_highlight"])
 
     def test_joins_physical_and_sale_rooms_and_deduplicates_images(self) -> None:
         payload = {
@@ -245,6 +324,36 @@ class DetailExtractTests(unittest.TestCase):
             {item["name"] for item in result["rooms"][0]["amenities"]},
         )
         self.assertEqual(1, len(result["images"]))
+
+    def test_extracts_bed_type_from_complex_room_popup(self) -> None:
+        payload = {
+            "data": {
+                "roomPopInfo": {
+                    "10": {
+                        "id": 10,
+                        "name": "Family Room",
+                        "roomBasicInfo": {
+                            "bedInfo": {
+                                "complexBed": {
+                                    "content": [{
+                                        "roomName": "Bedroom 1",
+                                        "detail": ["1 queen bed", "1 single bed"],
+                                    }],
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+        result = extract_detail(
+            [{"url": "getRoomPopInfo", "response": payload}],
+            "123", "https://example.test/hotel",
+        )
+        self.assertEqual("1 queen bed; 1 single bed", result["rooms"][0]["bed_type"])
+        self.assertIsNone(result["rooms"][0].get("bedroom_count"))
+        self.assertIsNone(result["rooms"][0].get("bathroom_count"))
 
 
 if __name__ == "__main__":
