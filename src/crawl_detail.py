@@ -15,6 +15,7 @@ import asyncio
 import json
 import random
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -234,6 +235,13 @@ async def crawl_one(
     url = detail_url(target, checkin, checkout, locale, currency)
     raw_path = market_raw_dir(locale, currency) / f"{hotel_id}.json"
     page = await ctx.new_page()
+    # Chặn hình ảnh, media, font để tiết kiệm 80% băng thông và CPU
+    await page.route(
+        "**/*",
+        lambda route: route.abort()
+        if route.request.resource_type in ("image", "media", "font")
+        else route.continue_(),
+    )
     packets: list[dict[str, Any]] = []
     tasks: set[asyncio.Task] = set()
 
@@ -245,11 +253,21 @@ async def crawl_one(
     page.on("response", on_response)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=config.PAGE_TIMEOUT_MS)
-        await page.wait_for_timeout(3500)
-        # Kích hoạt lazy-load ảnh, tiện ích và room inventory.
+        # Cuộn nhanh kích hoạt lazy-load ảnh, tiện ích và room inventory
         for ratio in (0.35, 0.70, 1.0):
             await page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {ratio})")
-            await page.wait_for_timeout(900)
+            await page.wait_for_timeout(300)
+
+        # Smart Event Wait: Chờ đúng lúc gói tin phòng, album và popup phòng về (tối đa 7s)
+        start_wait = time.perf_counter()
+        while time.perf_counter() - start_wait < 7.0:
+            urls = [p.get("url", "") for p in packets]
+            has_rooms = any("getHotelRoomListOversea" in u for u in urls)
+            has_album = any("ctgethotelalbum" in u for u in urls)
+            has_pop = any("getHotelRoomPopInfoPCOnline" in u for u in urls)
+            if has_rooms and has_album and has_pop:
+                break
+            await asyncio.sleep(0.3)
 
         # JSON-LD thường chứa mô tả/ảnh ngay cả khi API đổi endpoint.
         for script in await page.locator("script[type='application/ld+json']").all_text_contents():
@@ -432,7 +450,8 @@ async def main(args: argparse.Namespace) -> None:
     out = config.DATA_DIR / f"hotel_details_{market_tag}_{stamp}.json"
     details: list[dict] = []
 
-    print(f"Detail: {len(targets)} hotel | {locale}/{currency} | {checkin} → {checkout}")
+    concurrency = max(1, int(getattr(args, "concurrency", None) or config.MAX_CONCURRENCY or 3))
+    print(f"Detail: {len(targets)} hotel | {locale}/{currency} | {checkin} → {checkout} | Concurrency: {concurrency}")
     print("Không chạy song song với crawl_api.py (dùng chung browser_profile).")
 
     async with async_playwright() as p:
@@ -454,7 +473,12 @@ async def main(args: argparse.Namespace) -> None:
                 f"Chi tiết: {exc}"
             ) from exc
 
-        for index, target in enumerate(targets, 1):
+        sem = asyncio.Semaphore(concurrency)
+        lock = asyncio.Lock()
+        processed_count = 0
+
+        async def process_target(target: dict) -> dict:
+            nonlocal processed_count
             cached = (
                 _load_cached(
                     target["trip_hotel_id"],
@@ -465,23 +489,37 @@ async def main(args: argparse.Namespace) -> None:
                 if not args.no_resume else None
             )
             if cached:
-                details.append(cached)
-                print(f"[{index}/{len(targets)}] cache {target['trip_hotel_id']}")
-                continue
-            row = await crawl_one(ctx, target, checkin, checkout, locale, currency)
-            details.append(row)
-            print(
-                f"[{index}/{len(targets)}] {target['trip_hotel_id']} "
-                f"{'OK' if row.get('success') else 'LỖI'} | "
-                f"ảnh={len(row.get('images') or [])}, "
-                f"tiện ích={len(row.get('amenities') or [])}, "
-                f"phòng={len(row.get('rooms') or [])}"
-            )
-            if index % config.CHECKPOINT_EVERY == 0:
-                save_manifest(out, source, details, False, locale, currency)
-                print(f"  checkpoint → {out}")
-            await asyncio.sleep(random.uniform(config.MIN_DELAY, config.MAX_DELAY))
+                async with lock:
+                    details.append(cached)
+                    processed_count += 1
+                    print(f"[{processed_count}/{len(targets)}] cache {target['trip_hotel_id']}")
+                    if processed_count % config.CHECKPOINT_EVERY == 0:
+                        save_manifest(out, source, details, False, locale, currency)
+                        print(f"  checkpoint → {out}")
+                return cached
 
+            async with sem:
+                # Jitter nhẹ khi mở tab mới để không trùng khít miligiây
+                await asyncio.sleep(random.uniform(0.1, 0.4))
+                row = await crawl_one(ctx, target, checkin, checkout, locale, currency)
+                async with lock:
+                    details.append(row)
+                    processed_count += 1
+                    print(
+                        f"[{processed_count}/{len(targets)}] {target['trip_hotel_id']} "
+                        f"{'OK' if row.get('success') else 'LỖI'} | "
+                        f"ảnh={len(row.get('images') or [])}, "
+                        f"tiện ích={len(row.get('amenities') or [])}, "
+                        f"phòng={len(row.get('rooms') or [])}"
+                    )
+                    if processed_count % config.CHECKPOINT_EVERY == 0:
+                        save_manifest(out, source, details, False, locale, currency)
+                        print(f"  checkpoint → {out}")
+                # Nghỉ ngắn trước khi nhường slot cho khách sạn tiếp theo
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+                return row
+
+        await asyncio.gather(*(process_target(t) for t in targets))
         await ctx.close()
 
     success = sum(1 for row in details if row.get("success"))
@@ -496,6 +534,8 @@ if __name__ == "__main__":
     ap.add_argument("--from-db", action="store_true", help="đọc danh sách hotel từ PostgreSQL")
     ap.add_argument("--limit", type=int, help="chỉ crawl N hotel đầu (nên dùng 1 để kiểm thử)")
     ap.add_argument("--start-after", type=int, help="chỉ lấy trip_hotel_id lớn hơn giá trị này")
+    ap.add_argument("--concurrency", type=int, default=config.MAX_CONCURRENCY,
+                    help=f"số tabs crawl song song (mặc định {config.MAX_CONCURRENCY})")
     ap.add_argument("--checkin", help="YYYY-MM-DD")
     ap.add_argument("--checkout", help="YYYY-MM-DD")
     ap.add_argument("--locale", default=config.LOCALE, help="Trip.com locale, ví dụ vi-VN hoặc en-US")
