@@ -71,6 +71,7 @@ def main(args: argparse.Namespace) -> None:
     }
     location_ids: set[int] = set()
     save_prices = not args.no_prices
+    preserve_hotel_amenities = getattr(args, "preserve_hotel_amenities", False)
 
     with psycopg2.connect(config.dsn()) as conn, conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.hotel_translations')")
@@ -133,11 +134,12 @@ def main(args: argparse.Namespace) -> None:
                     "AND r.hotel_id=ANY(%s) AND t.locale=%s",
                     (replace_ids, locale),
                 )
-                cur.execute(
-                    "DELETE FROM hotel_amenity_translations t USING hotel_amenities a "
-                    "WHERE t.hotel_amenity_id=a.id AND a.hotel_id=ANY(%s) AND t.locale=%s",
-                    (replace_ids, locale),
-                )
+                if not preserve_hotel_amenities:
+                    cur.execute(
+                        "DELETE FROM hotel_amenity_translations t USING hotel_amenities a "
+                        "WHERE t.hotel_amenity_id=a.id AND a.hotel_id=ANY(%s) AND t.locale=%s",
+                        (replace_ids, locale),
+                    )
                 cur.execute(
                     "DELETE FROM hotel_translations WHERE hotel_id=ANY(%s) AND locale=%s",
                     (replace_ids, locale),
@@ -176,7 +178,10 @@ def main(args: argparse.Namespace) -> None:
         )
         run_id = cur.fetchone()[0]
 
-        for detail in details:
+        print(f"Import {path.name}: {len(details)} hotel; preserve_hotel_amenities={preserve_hotel_amenities}", flush=True)
+        for index, detail in enumerate(details, 1):
+            if index % 50 == 0:
+                print(f"[{index}/{len(details)}] đang import; transaction chưa commit", flush=True)
             hotel_id = str(detail.get("trip_hotel_id") or "")
             if not hotel_id:
                 stats["failed"] += 1
@@ -377,7 +382,7 @@ def main(args: argparse.Namespace) -> None:
                     """, category_rows)
                     stats["image_categories"] += len(category_rows)
 
-            for item in detail.get("amenities") or []:
+            for item in ([] if preserve_hotel_amenities else detail.get("amenities") or []):
                 amenity_name = item.get("name")
                 if not amenity_name:
                     continue
@@ -594,18 +599,19 @@ def main(args: argparse.Namespace) -> None:
                     stats["prices"] += 1
 
         if args.replace_existing and replace_ids:
-            cur.execute(
-                """
-                DELETE FROM hotel_amenities a
-                WHERE a.hotel_id=ANY(%s)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM hotel_amenity_translations t
-                      WHERE t.hotel_amenity_id=a.id
-                  )
-                """,
-                (replace_ids,),
-            )
-            stats["orphan_amenities_removed"] = cur.rowcount
+            if not preserve_hotel_amenities:
+                cur.execute(
+                    """
+                    DELETE FROM hotel_amenities a
+                    WHERE a.hotel_id=ANY(%s)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM hotel_amenity_translations t
+                          WHERE t.hotel_amenity_id=a.id
+                      )
+                    """,
+                    (replace_ids,),
+                )
+                stats["orphan_amenities_removed"] = cur.rowcount
             cur.execute(
                 """
                 DELETE FROM hotel_images i
@@ -634,6 +640,8 @@ def main(args: argparse.Namespace) -> None:
     print(json.dumps(stats, ensure_ascii=False, indent=2))
     if args.no_prices:
         print("Đã bỏ qua snapshot giá theo yêu cầu --no-prices.")
+    if preserve_hotel_amenities:
+        print("Đã giữ nguyên hotel_amenities và hotel_amenity_translations; tiện nghi phòng vẫn được import.")
 
 
 if __name__ == "__main__":
@@ -644,6 +652,8 @@ if __name__ == "__main__":
     ap.add_argument("--locale", help="ghi đè locale trong manifest, ví dụ en-US")
     ap.add_argument("--currency", help="ghi đè currency trong manifest, ví dụ USD")
     ap.add_argument("--dry-run", action="store_true", help="kiểm tra SQL rồi rollback, không ghi DB")
+    ap.add_argument("--preserve-hotel-amenities", action="store_true",
+                    help="không ghi/xóa tiện nghi khách sạn hoặc bản dịch; vẫn import tiện nghi phòng")
     ap.add_argument(
         "--replace-existing", action="store_true",
         help="xóa bản dịch và giá cũ của đúng locale/currency rồi import lại",

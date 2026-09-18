@@ -19,6 +19,7 @@ from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import config
+import raw_store
 import psycopg2
 from psycopg2.extras import Json, RealDictCursor
 from playwright.async_api import (async_playwright, Error as BrowserError,
@@ -123,16 +124,16 @@ def targets(conn, args, locale):
             break
         raw = config.OUTPUT_DIR / 'details' / 'raw' / locale / ('VND' if locale == 'vi-VN' else 'USD') / (row['trip_hotel_id'] + '.json')
         legacy = config.OUTPUT_DIR / 'details' / 'raw' / (row['trip_hotel_id'] + '.json')
-        if not raw.exists() and locale == 'vi-VN':
+        if not raw_store.exists(raw) and locale == 'vi-VN':
             raw = legacy
-        if not raw.exists():
+        if not raw_store.exists(raw):
             continue
         checkpoint = config.OUTPUT_DIR / 'amenity_repairs' / locale / (row['trip_hotel_id'] + '.json')
         if not args.force and completed_checkpoint(checkpoint):
             result.append(dict(row))
             continue
         try:
-            if not json.loads(raw.read_text(encoding='utf-8')).get('normalized', {}).get('success'):
+            if not raw_store.read(raw).get('normalized', {}).get('success'):
                 continue
         except (ValueError, OSError):
             continue

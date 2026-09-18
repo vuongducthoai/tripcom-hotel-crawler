@@ -23,6 +23,7 @@ from typing import Any
 from playwright.async_api import async_playwright
 
 import config
+import raw_store
 from db.i18n import language_key
 from detail_extract import PARSER_VERSION, extract_detail
 from hotel_facilities import capture_hotel_facilities
@@ -385,9 +386,7 @@ async def crawl_one(
         normalized["name"] = normalized.get("name") or target.get("name")
         normalized["address"] = normalized.get("address") or target.get("address")
         raw = {"target": target, "url": url, "normalized": normalized, "responses": packets}
-        raw_path.write_text(
-            json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        raw_store.write(raw_path, raw)
         return normalized
     except Exception as exc:
         result = {
@@ -405,19 +404,18 @@ async def crawl_one(
             "images": [], "amenities": [], "rooms": [],
         }
         error_path = raw_path
-        if raw_path.exists():
+        if raw_store.exists(raw_path):
             try:
-                previous = json.loads(raw_path.read_text(encoding="utf-8"))
+                previous = raw_store.read(raw_path)
                 if (previous.get("normalized") or {}).get("success"):
                     error_path = raw_path.with_name(
                         f"{hotel_id}.failed.{datetime.now():%Y%m%d_%H%M%S}.json"
                     )
             except Exception:
                 pass
-        error_path.write_text(
-            json.dumps({"target": target, "normalized": result, "responses": packets},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        raw_store.write(
+            error_path,
+            {"target": target, "normalized": result, "responses": packets},
         )
         return result
     finally:
@@ -436,14 +434,14 @@ def _load_cached(
     if (
         allow_legacy
         and
-        not path.exists() and locale == "vi-VN" and currency.upper() == "VND"
-        and legacy_path.exists()
+        not raw_store.exists(path) and locale == "vi-VN" and currency.upper() == "VND"
+        and raw_store.exists(legacy_path)
     ):
         path = legacy_path
-    if not path.exists():
+    if not raw_store.exists(path):
         return None
     try:
-        dump = json.loads(path.read_text(encoding="utf-8"))
+        dump = raw_store.read(path)
         value = dump.get("normalized")
     except Exception:
         return None
@@ -463,7 +461,7 @@ def _load_cached(
             )
             value.update(fresh)
             dump["normalized"] = value
-            path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
+            raw_store.write(path, dump)
         except Exception:
             return None
     if value:
