@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Khách sạn đã crawl · TP.HCM</title>
+  <link rel="stylesheet" href="/assets/hotels.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="/"><span class="logo-mark">T</span><span><strong>Trip.com Crawl</strong><small>Hotel Data Showcase</small></span></a>
+    <nav class="site-nav"><a class="active" href="/">Khách sạn</a><a href="/database.html">Database Inspector</a></nav>
+    <div id="db-status" class="connection"><i></i><span>Đang kết nối...</span></div>
+  </header>
+
+  <main id="catalog-view">
+    <section class="hero">
+      <div><div class="eyebrow">DỮ LIỆU ĐÃ THU THẬP</div><h1>Khách sạn tại TP. Hồ Chí Minh</h1><p>Danh sách và dữ liệu chi tiết được crawl từ Trip.com, chuẩn hóa và lưu trong PostgreSQL.</p></div>
+      <div class="hero-metrics"><div><strong id="metric-total">—</strong><span>Khách sạn</span></div><div><strong>VI · EN</strong><span>Ngôn ngữ</span></div><div><strong>VND · USD</strong><span>Đơn vị giá</span></div></div>
+    </section>
+
+    <section class="filter-card">
+      <label class="catalog-search"><span>⌕</span><input id="hotel-search" type="search" placeholder="Tìm theo tên, địa chỉ hoặc Trip hotel ID..." autocomplete="off"></label>
+      <select id="catalog-locale" aria-label="Ngôn ngữ"><option value="vi">Tiếng Việt</option><option value="en">English (đã crawl)</option></select>
+      <select id="catalog-currency" aria-label="Tiền tệ"><option value="VND">VND</option><option value="USD">USD</option></select>
+      <select id="star-filter" aria-label="Hạng sao"><option value="">Tất cả hạng sao</option><option value="5">5 sao</option><option value="4">4 sao</option><option value="3">3 sao</option><option value="2">2 sao</option><option value="1">1 sao</option></select>
+      <select id="status-filter" aria-label="Trạng thái detail"><option value="">Tất cả trạng thái</option><option value="complete">Đủ detail</option><option value="partial">Thiếu một phần</option><option value="missing">Chưa có detail</option></select>
+      <select id="sort-filter" aria-label="Sắp xếp"><option value="recent">Mới cập nhật</option><option value="rating">Điểm đánh giá</option><option value="reviews">Lượt đánh giá</option><option value="stars">Hạng sao</option><option value="name">Tên A–Z</option></select>
+    </section>
+
+    <section class="catalog-heading"><div><h2>Danh sách khách sạn</h2><p id="catalog-summary">Đang tải dữ liệu...</p></div><button id="refresh-hotels" class="ghost-button">↻ Làm mới</button></section>
+    <div id="catalog-error" class="error-box hidden"></div>
+    <section id="hotel-list" class="hotel-list" aria-live="polite"></section>
+    <div id="catalog-loading" class="page-loading"><span></span>Đang tải khách sạn...</div>
+    <div id="catalog-empty" class="empty-view hidden"><b>Không tìm thấy khách sạn</b><span>Hãy thử thay đổi từ khóa hoặc bộ lọc.</span></div>
+    <footer class="catalog-pagination"><span id="catalog-range">—</span><div><button id="catalog-prev">‹ Trước</button><span id="catalog-page">1</span><button id="catalog-next">Sau ›</button></div></footer>
+  </main>
+
+  <main id="detail-view" class="detail-view hidden">
+    <div class="detail-topbar"><button id="back-to-list" class="back-button">← Danh sách khách sạn</button><div class="detail-actions"><select id="detail-locale"><option value="vi">Tiếng Việt</option><option value="en">English</option></select><a id="trip-link" class="trip-link" href="#" target="_blank" rel="noopener">Mở trên Trip.com ↗</a></div></div>
+    <section id="hotel-overview" class="detail-hero"></section>
+    <nav id="detail-tabs" class="detail-tabs" aria-label="Các phân mục khách sạn">
+      <button class="active" data-section="overview">Tổng quan</button><button data-section="translations">VI / EN</button><button data-section="rooms">Phòng</button><button data-section="prices">Giá</button><button data-section="images">Ảnh</button><button data-section="amenities">Tiện nghi</button><button data-section="policies">Chính sách</button><button data-section="nearby">Vị trí lân cận</button><button data-section="raw">Dữ liệu thô</button>
+    </nav>
+    <section id="detail-content" class="detail-content"></section>
+  </main>
+
+  <div id="toast" class="toast"></div><script src="/assets/hotels.js" defer></script>
+</body>
+</html>

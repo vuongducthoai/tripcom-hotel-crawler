@@ -22,6 +22,7 @@ import psycopg2
 from psycopg2.extras import Json, execute_values
 
 import config
+from db.i18n import language_key
 from db.location_upsert import upsert_city
 
 VIETNAM_TZ = timezone(timedelta(hours=7), name="Asia/Ho_Chi_Minh")
@@ -57,7 +58,8 @@ def main(args: argparse.Namespace) -> None:
     path = resolve_file(args.file)
     payload = json.loads(path.read_text(encoding="utf-8"))
     details = payload.get("details") or []
-    locale = args.locale or payload.get("locale") or "vi-VN"
+    request_locale = args.locale or payload.get("locale") or "vi-VN"
+    locale = language_key(request_locale)
     currency = (args.currency or payload.get("currency") or "VND").upper()
     stats = {
         "hotels": 0, "missing_hotels": 0, "failed": 0,
@@ -96,6 +98,10 @@ def main(args: argparse.Namespace) -> None:
         if cur.fetchone()[0] is None:
             raise SystemExit("Hãy chạy migrations/005_amenity_fees_nearby_places.sql trước.")
         replaced_hotels = 0
+        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' "
+                    "AND table_name='hotel_amenities' AND column_name='is_available'")
+        if cur.fetchone() is None:
+            raise SystemExit("Hãy chạy migrations/011_hotel_amenity_availability.sql trước.")
         if args.replace_existing:
             trip_ids = [
                 str(item.get("trip_hotel_id"))
@@ -112,7 +118,8 @@ def main(args: argparse.Namespace) -> None:
                 # Only replace the selected market. Shared entities and translations
                 # belonging to other languages must survive an English re-import.
                 cur.execute(
-                    "DELETE FROM hotel_prices WHERE hotel_id=ANY(%s) AND locale=%s AND currency=%s",
+                    "DELETE FROM hotel_prices WHERE hotel_id=ANY(%s) AND language=%s "
+                    "AND currency=%s AND price_type='room'",
                     (replace_ids, locale, currency),
                 )
                 cur.execute(
@@ -194,12 +201,13 @@ def main(args: argparse.Namespace) -> None:
                 continue
             db_hotel_id, current_location_id, stored_city_name = found
             location_id = current_location_id or upsert_city(
-                cur, detail.get("city_name") or stored_city_name
+                cur, detail.get("city_name") or stored_city_name,
+                language=locale,
             )
             if location_id:
                 location_ids.add(location_id)
                 localized_city = detail.get("city_name")
-                if not localized_city and locale == "vi-VN":
+                if not localized_city and locale == "vi":
                     localized_city = stored_city_name
                 if localized_city:
                     cur.execute(
@@ -221,20 +229,17 @@ def main(args: argparse.Namespace) -> None:
                 """
                 UPDATE hotels SET
                     location_id = COALESCE(%s, location_id),
-                    description = CASE WHEN %s='vi-VN' THEN COALESCE(%s, description) ELSE description END,
-                    hotel_type = CASE WHEN %s='vi-VN' THEN %s ELSE hotel_type END,
                     raw_json = jsonb_set(
                         COALESCE(raw_json, '{}'::jsonb), '{detail_by_locale}',
                         COALESCE(raw_json->'detail_by_locale', '{}'::jsonb)
                             || jsonb_build_object(%s, %s::jsonb), true
-                    ) || CASE WHEN %s='vi-VN'
+                    ) || CASE WHEN %s='vi'
                               THEN jsonb_build_object('detail', %s::jsonb)
                               ELSE '{}'::jsonb END,
                     last_seen_at = now()
                 WHERE id = %s
                 """,
-                (location_id, locale, detail.get("description"), locale,
-                 detail.get("hotel_type"), locale, Json(normalized_for_raw),
+                (location_id, locale, Json(normalized_for_raw),
                  locale, Json(normalized_for_raw), db_hotel_id),
             )
             cur.execute(
@@ -247,7 +252,7 @@ def main(args: argparse.Namespace) -> None:
                     name=COALESCE(EXCLUDED.name, hotel_translations.name),
                     address=COALESCE(EXCLUDED.address, hotel_translations.address),
                     description=COALESCE(EXCLUDED.description, hotel_translations.description),
-                    hotel_type=EXCLUDED.hotel_type,
+                    hotel_type=COALESCE(EXCLUDED.hotel_type, hotel_translations.hotel_type),
                     source_url=COALESCE(EXCLUDED.source_url, hotel_translations.source_url),
                     raw_json=EXCLUDED.raw_json,
                     crawled_at=EXCLUDED.crawled_at,
@@ -390,30 +395,32 @@ def main(args: argparse.Namespace) -> None:
                     cur.execute(
                         """
                         INSERT INTO hotel_amenities
-                            (hotel_id, amenity_code, amenity_name, category, free_type, is_highlight)
-                        VALUES (%s,%s,%s,%s,%s,%s)
+                            (hotel_id, amenity_code, amenity_name, category, free_type, is_highlight, is_available)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (hotel_id, amenity_name) DO UPDATE SET
                             amenity_code=COALESCE(EXCLUDED.amenity_code, hotel_amenities.amenity_code),
-                            category=CASE WHEN %s='vi-VN' THEN EXCLUDED.category
+                            category=CASE WHEN %s='vi' THEN EXCLUDED.category
                                           ELSE COALESCE(hotel_amenities.category,
                                                         EXCLUDED.category) END,
                             free_type=COALESCE(EXCLUDED.free_type, hotel_amenities.free_type),
-                            is_highlight=COALESCE(EXCLUDED.is_highlight, hotel_amenities.is_highlight)
+                            is_highlight=COALESCE(EXCLUDED.is_highlight, hotel_amenities.is_highlight),
+                            is_available=COALESCE(EXCLUDED.is_available, hotel_amenities.is_available)
                         RETURNING id
                         """,
                         (db_hotel_id, amenity_code, amenity_name, item.get("category"),
-                         item.get("free_type"), item.get("is_highlight"), locale),
+                         item.get("free_type"), item.get("is_highlight"), item.get("is_available"), locale),
                     )
                     amenity_db_id = cur.fetchone()[0]
-                elif item.get("category"):
+                else:
                     cur.execute(
                         """
                         UPDATE hotel_amenities SET category=
-                            CASE WHEN %s='vi-VN' THEN %s
+                            CASE WHEN %s='vi' THEN COALESCE(%s, category)
                                  ELSE COALESCE(category, %s) END
+                            , is_available=COALESCE(%s, is_available)
                         WHERE id=%s
                         """,
-                        (locale, item.get("category"), item.get("category"), amenity_db_id),
+                        (locale, item.get("category"), item.get("category"), item.get("is_available"), amenity_db_id),
                     )
                 cur.execute(
                     """
@@ -442,8 +449,8 @@ def main(args: argparse.Namespace) -> None:
                          bedroom_count, bathroom_count, bed_count, raw_json)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (hotel_id, trip_room_id) DO UPDATE SET
-                        name=CASE WHEN %s='vi-VN' THEN EXCLUDED.name ELSE room_types.name END,
-                        bed_type=CASE WHEN %s='vi-VN'
+                        name=CASE WHEN %s='vi' THEN EXCLUDED.name ELSE room_types.name END,
+                        bed_type=CASE WHEN %s='vi'
                                       THEN COALESCE(EXCLUDED.bed_type, room_types.bed_type)
                                       ELSE room_types.bed_type END,
                         max_occupancy=COALESCE(EXCLUDED.max_occupancy, room_types.max_occupancy),
@@ -451,7 +458,7 @@ def main(args: argparse.Namespace) -> None:
                         bedroom_count=COALESCE(EXCLUDED.bedroom_count, room_types.bedroom_count),
                         bathroom_count=COALESCE(EXCLUDED.bathroom_count, room_types.bathroom_count),
                         bed_count=COALESCE(EXCLUDED.bed_count, room_types.bed_count),
-                        raw_json=CASE WHEN %s='vi-VN' THEN EXCLUDED.raw_json ELSE room_types.raw_json END
+                        raw_json=CASE WHEN %s='vi' THEN EXCLUDED.raw_json ELSE room_types.raw_json END
                     RETURNING id
                 """, (
                     db_hotel_id, room["trip_room_id"], room["name"], room.get("bed_type"),
@@ -551,7 +558,8 @@ def main(args: argparse.Namespace) -> None:
                         SELECT id FROM hotel_prices
                         WHERE hotel_id=%s AND room_type_id=%s
                           AND check_in=%s AND check_out=%s
-                          AND locale=%s AND currency=%s AND captured_date=%s
+                          AND language=%s AND currency=%s AND captured_date=%s
+                          AND price_type='room'
                         ORDER BY id LIMIT 1
                         """,
                         (db_hotel_id, room_db_id, check_in, check_out,
@@ -562,7 +570,7 @@ def main(args: argparse.Namespace) -> None:
                         cur.execute(
                             """
                             UPDATE hotel_prices SET price=%s, currency=%s,
-                                locale=%s, tax_included=%s, captured_at=%s,
+                                language=%s, tax_included=%s, captured_at=%s,
                                 captured_date=%s
                             WHERE id=%s
                             """,
@@ -575,8 +583,9 @@ def main(args: argparse.Namespace) -> None:
                             """
                             INSERT INTO hotel_prices
                                 (hotel_id, room_type_id, check_in, check_out, price,
-                                 currency, locale, tax_included, captured_at, captured_date)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                 currency, language, price_type, tax_included,
+                                 captured_at, captured_date)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,'room',%s,%s,%s)
                             """,
                             (db_hotel_id, room_db_id, check_in, check_out,
                              room.get("price"), room.get("currency") or currency,
