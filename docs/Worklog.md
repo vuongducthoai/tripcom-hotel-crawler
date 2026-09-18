@@ -1,5 +1,16 @@
 # Project Worklog
 
+### 2026-09-18
+
+| Member | Task | Status | Output |
+| :--- | :--- | :--- | :--- |
+| Vương Đức Thoại | Xây dựng module trích xuất tiện nghi tổng quan khách sạn (`src/hotel_facilities.py`), bổ sung migrations 006 đến 011 chuẩn hóa dữ liệu song ngữ/giá/tọa độ/trạng thái tiện nghi, xây dựng giao diện web tra cứu dữ liệu (`src/web_app.py`, `web/`) và các script kiểm toán dữ liệu | ✅ Done | [`src/hotel_facilities.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/hotel_facilities.py), [`src/web_app.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/web_app.py), `migrations/006-011`; Commit [`ceb4415`](https://github.com/vuongducthoai/tripcom-hotel-crawler/commit/ceb441516b431aeb75b325aa95cce6ce1e0869d6) |
+| Trần Đăng Nguyên | Đồng bộ hợp nhất `origin/main` vào `CrawlingIssue`, dung hợp trọn vẹn cơ chế bóc tách tiện nghi khách sạn mới với hệ thống worker đa luồng và tối ưu tốc độ, nghiệm thu 13/13 unit tests đạt chuẩn | ✅ Done | [`src/crawl_detail.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/crawl_detail.py), [`tests/test_detail_extract.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/tests/test_detail_extract.py) |
+
+**Tổng kết ngày**: Tích hợp thành công các nâng cấp cốt lõi từ `main`: trích xuất chuẩn xác tiện nghi tổng thể khách sạn từ `window.__next_f` và DOM (kèm trạng thái khả dụng `is_available`), chuẩn hóa hệ thống bảng đa ngôn ngữ ISO `vi`/`en` (migrations 006-011), giao diện web đọc dữ liệu trực quan và bộ công cụ kiểm toán toàn vẹn dữ liệu. Toàn bộ 13/13 unit tests pass hoàn hảo.
+
+---
+
 ### 2026-09-17
 
 | Member | Task | Status | Output |
