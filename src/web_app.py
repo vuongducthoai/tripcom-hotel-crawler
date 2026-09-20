@@ -27,6 +27,8 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 import config
+import crawl_coverage
+from crawl_jobs import RUNNER
 
 
 WEB_DIR = config.ROOT / "web"
@@ -717,6 +719,36 @@ class DataViewerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        """Chỉ nhận 2 lệnh: bắt đầu một job có sẵn, hoặc dừng job đang chạy.
+
+        Không có đường nào để web truyền lệnh tuỳ ý xuống shell — xem
+        crawl_jobs.JOB_SPECS.
+        """
+        path = unquote(urlsplit(self.path).path)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                payload = json.loads(raw or b"{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError("Body phải là JSON hợp lệ.") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("Body phải là một object JSON.")
+
+            if path == "/api/crawl/start":
+                job = RUNNER.start(str(payload.get("job") or ""), payload.get("params") or {})
+                self.send_json({"ok": True, "job": job})
+                return
+            if path == "/api/crawl/stop":
+                self.send_json({"ok": True, "job": RUNNER.stop()})
+                return
+            self.send_error(HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
@@ -766,6 +798,20 @@ class DataViewerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/database" or path == "/database.html":
                 self.send_static("database.html")
+                return
+            if path == "/crawl" or path == "/crawl.html":
+                self.send_static("crawl.html")
+                return
+            if path == "/api/crawl/coverage":
+                locale = _query_value(query, "locale", "vi")
+                with db_connection() as conn:
+                    self.send_json({
+                        "coverage": crawl_coverage.coverage(conn, locale),
+                        "cities": crawl_coverage.cities(conn),
+                    })
+                return
+            if path == "/api/crawl/jobs":
+                self.send_json(RUNNER.status())
                 return
             if path.startswith("/assets/"):
                 self.send_static(path.removeprefix("/"))
