@@ -10,6 +10,7 @@ import hashlib
 import re
 import urllib.parse
 from typing import Any, Iterator
+from hotel_description import description_text, find_description_info
 
 IMAGE_RE = re.compile(r"^https?://[^\s]+(?:\.(?:jpe?g|png|webp|avif)(?:\?|$)|tripcdn)", re.I)
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
@@ -664,6 +665,7 @@ def extract_detail(
     amenities: dict[str, dict] = {}
     rooms: dict[str, dict] = {}
     descriptions: list[str] = []
+    property_descriptions: list[str] = []
     hotel_types: list[str] = []
     hotel_names: list[str] = []
     hotel_addresses: list[str] = []
@@ -687,6 +689,14 @@ def extract_detail(
         room_packet = any(token in packet_url for token in (
             "getroom", "roomlist", "roompop", "roomdetail", "room-facilities",
         ))
+        if not room_packet:
+            info = find_description_info(data, hotel_id)
+            if packet.get("url") == "embedded:hotel-description" and isinstance(data, dict):
+                if str(data.get("hotel_id")) == str(hotel_id):
+                    info = data.get("hotelDescriptionInfo")
+            text = description_text(info)
+            if text:
+                property_descriptions.append(text)
 
         if packet.get("url") == "embedded:hotel-policies" and isinstance(data, dict):
             for policy in _extract_modal_policies(str(data.get("text") or "")):
@@ -749,7 +759,17 @@ def extract_detail(
 
             if isinstance(value, str):
                 leaf = low_path.rsplit(".", 1)[-1]
-                if leaf in {"description", "hoteldescription", "descriptiontext", "introduction"}:
+                property_context = (
+                    packet.get("url") == "embedded:page-meta"
+                    or (packet.get("url") == "embedded:json-ld"
+                        and isinstance(data, dict)
+                        and str(data.get("@type") or "").lower() in {"hotel", "lodgingbusiness", "resort"})
+                    or leaf in {"hoteldescription", "introduction"}
+                )
+                unrelated_context = room_packet or any(token in low_path for token in (
+                    "room", "policy", "faq", "comment", "review", "rating", "hotelList".lower(),
+                ))
+                if property_context and not unrelated_context and leaf in {"description", "hoteldescription", "descriptiontext", "introduction"}:
                     text = " ".join(value.split())
                     generic_markers = (
                         "bạn đang tìm đặt phòng",
@@ -886,7 +906,8 @@ def extract_detail(
             if item.get("is_highlight") and key in amenities:
                 amenities[key]["is_highlight"] = True
 
-    description = max(descriptions, key=len) if descriptions else None
+    description = (max(property_descriptions, key=len) if property_descriptions
+                   else max(descriptions, key=len) if descriptions else None)
     hotel_type = hotel_types[0] if hotel_types else None
     return {
         "parser_version": PARSER_VERSION,

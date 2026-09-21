@@ -23,6 +23,7 @@ import json
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.async_api import Response, async_playwright
@@ -188,16 +189,23 @@ SCROLL_JS = """
 """
 
 
-async def main(url: str) -> None:
+async def main(url: str, locale: str | None = None, profile_dir: str | None = None) -> None:
     rec = Recorder()
+    locale = locale or config.LOCALE
+    # Mỗi thị trường có profile riêng: recon tiếng Anh phải dùng đúng profile
+    # tiếng Anh, không thì cookie/token lấy được sẽ không khớp lúc cào thật.
+    profile = Path(profile_dir) if profile_dir else config.PROFILE_DIR
+    if not profile.is_absolute():
+        profile = config.ROOT / profile
     print(f"Recon: {url}")
+    print(f"Profile: {profile}  |  locale: {locale}")
     print("Đang mở browser với profile đã lưu…\n")
 
     async with async_playwright() as p:
         ctx = await p.chromium.launch_persistent_context(
-            user_data_dir=str(config.PROFILE_DIR),
+            user_data_dir=str(profile),
             headless=config.HEADLESS,
-            locale=config.LOCALE,
+            locale=locale,
             timezone_id=config.TIMEZONE,
             viewport=config.VIEWPORT,
             args=["--disable-blink-features=AutomationControlled"],
@@ -243,8 +251,10 @@ async def main(url: str) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default=config.TARGET_URLS["list_hcmc"])
+    ap.add_argument("--locale", help="vi-VN hoặc en-US; mặc định lấy từ .env")
+    ap.add_argument("--profile-dir", help="profile Chromium; mặc định browser_profile")
     args = ap.parse_args()
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    asyncio.run(main(args.url))
+    asyncio.run(main(args.url, args.locale, args.profile_dir))

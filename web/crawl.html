@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crawl &amp; theo dõi · Trip.com</title>
+  <link rel="stylesheet" href="/assets/hotels.css">
+  <link rel="stylesheet" href="/assets/crawl.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="/"><span class="logo-mark">T</span><span><strong>Trip.com Crawl</strong><small>Hotel Data Showcase</small></span></a>
+    <nav class="site-nav">
+      <a href="/">Khách sạn</a>
+      <a href="/database.html">Database Inspector</a>
+      <a class="active" href="/crawl.html">Crawl &amp; Theo dõi</a>
+    </nav>
+    <div id="db-status" class="connection"><i></i><span>Đang kết nối...</span></div>
+  </header>
+
+  <main class="crawl-main">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">ĐIỀU KHIỂN &amp; GIÁM SÁT</div>
+        <h1>Crawl và theo dõi độ phủ dữ liệu</h1>
+        <p>Chạy các bước crawl bằng nút bấm, xem phần nào còn thiếu và tiến độ theo thời gian thực.</p>
+      </div>
+      <div class="hero-metrics">
+        <div><strong id="metric-hotels">—</strong><span>Khách sạn trong DB</span></div>
+        <div><strong id="metric-overall">—</strong><span>Độ phủ trung bình</span></div>
+        <div><strong id="metric-locale">VI</strong><span>Ngôn ngữ đang xem</span></div>
+      </div>
+    </section>
+
+    <!-- ĐỘ PHỦ ------------------------------------------------------------ -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Độ phủ dữ liệu</h2>
+        <div class="panel-actions">
+          <select id="coverage-locale" aria-label="Ngôn ngữ">
+            <option value="vi">Tiếng Việt</option>
+            <option value="en">English</option>
+          </select>
+          <button id="refresh-coverage" class="btn" type="button">Làm mới</button>
+        </div>
+      </div>
+      <p class="panel-note">Sắp xếp từ thiếu nhiều nhất lên trên — chỗ nào đỏ là chỗ cần cào tiếp.</p>
+      <div id="coverage-list" class="coverage-list"><p class="muted">Đang tải…</p></div>
+    </section>
+
+    <!-- THÀNH PHỐ --------------------------------------------------------- -->
+    <section class="panel">
+      <div class="panel-head"><h2>Theo thành phố</h2></div>
+      <div id="city-list" class="city-list"><p class="muted">Đang tải…</p></div>
+    </section>
+
+    <!-- CHẠY JOB ---------------------------------------------------------- -->
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Chạy crawl</h2>
+        <span id="job-state" class="badge badge-idle">Rảnh</span>
+      </div>
+      <p class="panel-note">
+        Mỗi lần chỉ chạy được một job — các script dùng chung browser profile.
+        Job gọi ra Trip.com sẽ tự dừng nếu bị chặn liên tiếp.
+      </p>
+
+      <div class="job-form">
+        <label>Ngôn ngữ
+          <select id="job-locale">
+            <option value="vi-VN">vi-VN · VND</option>
+            <option value="en-US">en-US · USD</option>
+          </select>
+        </label>
+        <label>Thành phố (city id)
+          <input id="job-city" type="number" value="301" min="1">
+        </label>
+        <label>Worker
+          <select id="job-workers"><option>1</option><option selected>2</option><option>3</option></select>
+        </label>
+        <label>Giới hạn (để trống = tất cả)
+          <input id="job-limit" type="number" min="1" placeholder="vd 300">
+        </label>
+        <label class="check"><input id="job-missing" type="checkbox"> Chỉ hotel còn thiếu</label>
+        <label class="check"><input id="job-apply" type="checkbox" checked> Ghi vào DB (job tiện nghi)</label>
+      </div>
+
+      <div id="job-buttons" class="job-buttons"></div>
+
+      <div class="job-monitor">
+        <div class="progress-row">
+          <div class="progress"><div id="job-bar" class="progress-fill" style="width:0%"></div></div>
+          <span id="job-progress" class="progress-text">—</span>
+          <button id="stop-job" class="btn btn-danger" type="button" disabled>Dừng</button>
+        </div>
+        <div id="job-command" class="job-command muted"></div>
+        <pre id="job-log" class="job-log">Chưa chạy job nào.</pre>
+      </div>
+    </section>
+
+    <!-- LỊCH SỬ ----------------------------------------------------------- -->
+    <section class="panel">
+      <div class="panel-head"><h2>Job đã chạy</h2></div>
+      <div id="job-history" class="history-list"><p class="muted">Chưa có.</p></div>
+    </section>
+  </main>
+
+  <script src="/assets/crawl.js"></script>
+</body>
+</html>

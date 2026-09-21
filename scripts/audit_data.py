@@ -37,6 +37,8 @@ def main() -> None:
             "hotel_amenities", "hotel_amenity_translations",
             "room_types", "room_type_translations",
             "room_images", "room_amenities", "room_amenity_translations",
+            "hotel_policies", "hotel_policy_translations",
+            "hotel_nearby_places", "hotel_nearby_place_translations",
             "hotel_prices", "crawl_runs", "crawl_errors",
         ]
         counts = {}
@@ -141,6 +143,64 @@ def main() -> None:
             }
         except Exception as exc:
             report["integrity"] = f"ERROR: {exc}"
+
+        # -------------------------------- 6b. phần dễ bị bỏ sót: chính sách, lân cận,
+        #                                       cờ giá rẻ, phân bố theo thành phố
+        def scalar(sql):
+            try:
+                return q(sql)[0]["n"]
+            except Exception as exc:
+                conn.rollback()
+                conn.autocommit = True
+                return f"ERROR: {exc}"
+
+        report["coverage_extra"] = {
+            "hotels_with_policies": scalar(
+                "SELECT count(DISTINCT hotel_id) AS n FROM hotel_policies"),
+            "hotels_with_nearby_places": scalar(
+                "SELECT count(DISTINCT hotel_id) AS n FROM hotel_nearby_places"),
+            "hotels_with_prices": scalar(
+                "SELECT count(DISTINCT hotel_id) AS n FROM hotel_prices"),
+            # Trang "Khách sạn giá rẻ" — 1 trong 2 trang được giao ban đầu.
+            "hotels_flagged_cheap": scalar(
+                "SELECT count(*) AS n FROM hotels WHERE is_cheap_listing"),
+            # Chi tiết tiếng Anh thật sự (không tính tên seed từ name_en).
+            "hotels_with_english_rooms": scalar("""
+                SELECT count(DISTINCT rt.hotel_id) AS n
+                FROM room_type_translations t
+                JOIN room_types rt ON rt.id = t.room_type_id
+                WHERE left(t.locale, 2) = 'en'"""),
+            "hotels_with_english_amenities": scalar("""
+                SELECT count(DISTINCT a.hotel_id) AS n
+                FROM hotel_amenity_translations t
+                JOIN hotel_amenities a ON a.id = t.hotel_amenity_id
+                WHERE left(t.locale, 2) = 'en'"""),
+        }
+
+        try:
+            report["hotels_per_location"] = q("""
+                SELECT l.trip_location_id, l.name, count(h.id) AS hotels
+                FROM locations l LEFT JOIN hotels h ON h.location_id = l.id
+                GROUP BY l.trip_location_id, l.name ORDER BY hotels DESC
+            """)
+        except Exception as exc:
+            report["hotels_per_location"] = f"ERROR: {exc}"
+
+        # Giá trị locale thật trong DB: 'vi'/'en' hay 'vi-VN'/'en-US' — lẫn lộn 2 kiểu
+        # sẽ làm mọi thống kê song ngữ sai, nên liệt kê thẳng ra.
+        locale_values = {}
+        for table in ("hotel_translations", "location_translations", "room_type_translations",
+                      "hotel_amenity_translations", "room_amenity_translations",
+                      "hotel_policy_translations", "hotel_nearby_place_translations",
+                      "hotel_image_categories", "hotel_prices"):
+            try:
+                locale_values[table] = q(
+                    f"SELECT locale, count(*) AS n FROM {table} GROUP BY locale ORDER BY locale")
+            except Exception as exc:
+                conn.rollback()
+                conn.autocommit = True
+                locale_values[table] = f"ERROR: {exc}"
+        report["locale_values"] = locale_values
 
         # ---------------------------------------------------- 7. crawl_runs / errors
         try:

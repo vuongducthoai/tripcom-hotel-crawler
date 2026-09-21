@@ -21,6 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from detail_extract import extract_detail  # noqa: E402
 import config  # noqa: E402
+import raw_store  # noqa: E402
 
 
 def main(args: argparse.Namespace) -> None:
@@ -35,7 +36,7 @@ def main(args: argparse.Namespace) -> None:
         raw_dir = raw_root / locale / currency
         if not raw_dir.exists() and locale == "vi-VN" and currency == "VND":
             raw_dir = raw_root
-    raw_files = sorted(raw_dir.glob("*.json"))
+    raw_files = list(raw_store.iter_raw_files(raw_dir))
     if not raw_files:
         raise SystemExit(f"Không tìm thấy raw capture nào trong {raw_dir}")
 
@@ -45,14 +46,18 @@ def main(args: argparse.Namespace) -> None:
 
     for index, path in enumerate(raw_files, 1):
         try:
-            dump = json.loads(path.read_text(encoding="utf-8"))
+            dump = raw_store.read(path)
         except Exception as exc:
             print(f"  BỎ QUA {path.name}: không đọc được ({exc})")
             continue
 
         target = dump.get("target") or {}
         base = dict(dump.get("normalized") or {})
-        hotel_id = str(target.get("trip_hotel_id") or base.get("trip_hotel_id") or path.stem)
+        hotel_id = str(
+            target.get("trip_hotel_id")
+            or base.get("trip_hotel_id")
+            or raw_store.hotel_id(path)
+        )
         url = target.get("url") or base.get("url") or ""
         responses = dump.get("responses") or []
 
@@ -105,7 +110,7 @@ def main(args: argparse.Namespace) -> None:
         details.append(base)
         if not args.no_update_cache:
             dump["normalized"] = base
-            path.write_text(json.dumps(dump, ensure_ascii=False), encoding="utf-8")
+            raw_store.write(path, dump)
         if index == 1 or index % 50 == 0 or index == len(raw_files):
             print(
                 f"  Tiến độ: {index}/{len(raw_files)} raw "

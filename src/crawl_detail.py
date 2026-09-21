@@ -21,9 +21,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import async_playwright
+from playwright.async_api import Error as BrowserError, async_playwright
 
 import config
+import raw_store
 from db.i18n import language_key
 from detail_extract import PARSER_VERSION, extract_detail
 from hotel_facilities import capture_hotel_facilities
@@ -39,18 +40,54 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 MAX_RESPONSE_BYTES = 6_000_000
 MAX_RESPONSES = 50
 
+# Hotel không ra phòng sẽ được cào lại tối đa ngần này lần. Hết số lần mà vẫn
+# không có thì coi như trang thật sự không có phòng, khỏi thử mãi.
+MAX_ROOM_ATTEMPTS = 3
 
-def _spider_error_code(value: Any) -> str | None:
+# Chờ tối đa ngần này cho getHotelRoomList sau khi đã cuộn hết trang.
+ROOM_LIST_TIMEOUT_MS = 9000
+
+# Trip.com trả thông báo chặn dưới dạng mảng byte XOR chứ không phải JSON.
+ANTIBOT_XOR_KEY = 0x0A
+
+
+def _decode_obfuscated(value: list) -> str | None:
+    """Giải mảng byte XOR của Trip.com; None nếu không phải thông báo chặn.
+
+    Dạng này trông như [113, 40, 108, ...] nên bộ dò cũ duyệt qua chỉ thấy
+    toàn số nguyên và không nhận ra mình đang bị từ chối.
+    """
+    if not (50 <= len(value) <= 20_000):
+        return None
+    if not all(isinstance(byte, int) and 0 <= byte <= 255 for byte in value):
+        return None
+    text = "".join(chr(byte ^ ANTIBOT_XOR_KEY) for byte in value)
+    return text if ("failedcause" in text or "Antibot" in text) else None
+
+
+def _blocked_reason(value: Any) -> str | None:
+    """Lý do Trip.com từ chối, None nếu response bình thường.
+
+    Bắt cả hai dạng đã gặp thật:
+      - dict có htlSpiderActionErrorCode  (vd 4030)
+      - mảng byte XOR có failedcause      (vd Antibot-Gray-ip)
+    """
     if isinstance(value, dict):
         if value.get("htlSpiderActionErrorCode") is not None:
-            return str(value["htlSpiderActionErrorCode"])
+            return f"htlSpiderActionErrorCode={value['htlSpiderActionErrorCode']}"
         for child in value.values():
-            found = _spider_error_code(child)
+            found = _blocked_reason(child)
             if found:
                 return found
     elif isinstance(value, list):
+        decoded = _decode_obfuscated(value)
+        if decoded:
+            try:
+                return str(json.loads(decoded).get("failedcause") or "Antibot")
+            except Exception:
+                return "Antibot"
         for child in value:
-            found = _spider_error_code(child)
+            found = _blocked_reason(child)
             if found:
                 return found
     return None
@@ -61,6 +98,52 @@ def _has_detail(value: dict) -> bool:
         value.get("description") or value.get("hotel_type")
         or value.get("images") or value.get("amenities") or value.get("rooms")
     )
+
+
+BROWSER_CLOSED_HINTS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "target closed",
+    "connection closed",
+)
+
+
+def _browser_closed(exc: BaseException) -> bool:
+    """Chromium đã đóng hẳn — khác với lỗi điều hướng một trang."""
+    return any(hint in str(exc).lower() for hint in BROWSER_CLOSED_HINTS)
+
+
+def _rooms_sold_out(packets: list[dict]) -> bool:
+    """Trip.com có trả lời, và câu trả lời là 'hết phòng cho ngày này'.
+
+    Khác hẳn với việc gọi hụt API: đây là dữ liệu đầy đủ, chỉ là đêm đó
+    khách sạn không còn phòng bán. Không được tính là lỗi, nếu không thì
+    lúc chạy lại (bỏ qua hotel đã xong) đuôi hàng đợi toàn hotel hết phòng
+    và crawler sẽ tự dừng oan.
+    """
+    for packet in packets:
+        if "getHotelRoomList" not in str(packet.get("url") or ""):
+            continue
+        data = packet.get("response")
+        if not isinstance(data, dict):
+            continue
+        body = data.get("data")
+        if not isinstance(body, dict):
+            continue
+        if body.get("isRoomListSoldOut") is True and not (body.get("roomList") or []):
+            return True
+    return False
+
+
+def _previous_room_attempts(raw_path: Path) -> int:
+    """Số lần đã thử lấy phòng cho hotel này ở các lượt chạy trước."""
+    if not raw_store.exists(raw_path):
+        return 0
+    try:
+        previous = (raw_store.read(raw_path).get("normalized") or {})
+        return int(previous.get("room_attempts") or 0)
+    except Exception:
+        return 0
 
 
 def latest_overview() -> Path:
@@ -245,6 +328,45 @@ async def _wait_for_capture_quiet(
             return
 
 
+def _has_room_list(packets: list[dict]) -> bool:
+    return any("getHotelRoomList" in str(packet.get("url") or "") for packet in packets)
+
+
+async def _wait_for_room_list(
+    tasks: set[asyncio.Task], packets: list[dict], page=None,
+    *, timeout_ms: int = ROOM_LIST_TIMEOUT_MS,
+) -> bool:
+    """Chờ getHotelRoomList xuất hiện, vừa chờ vừa nhúc nhích trang.
+
+    Trip.com chỉ gọi API phòng khi khối phòng lọt vào viewport, và có máy/
+    mạng chậm thì nó về sau nhịp cuộn cuối cả chục giây. Trả True nếu thấy.
+    """
+    if _has_room_list(packets):
+        return True
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_ms / 1000
+    nudge = 0
+    while loop.time() < deadline:
+        await asyncio.sleep(0.4)
+        if _has_room_list(packets):
+            # Thấy rồi thì chờ nốt phần thân response được ghi xong.
+            await _wait_for_capture_quiet(
+                tasks, packets, min_wait_ms=300, max_wait_ms=2500, quiet_ms=400
+            )
+            return True
+        # Cứ ~1.6s lại cuộn nhẹ một nhịp để kích khối phòng.
+        nudge += 1
+        if page is not None and nudge % 4 == 0:
+            try:
+                await page.evaluate(
+                    "window.scrollTo(0, document.body.scrollHeight * "
+                    f"{0.55 + 0.15 * ((nudge // 4) % 3)})"
+                )
+            except Exception:
+                return _has_room_list(packets)
+    return _has_room_list(packets)
+
+
 def market_raw_dir(locale: str, currency: str) -> Path:
     path = RAW_DIR / locale / currency.upper()
     path.mkdir(parents=True, exist_ok=True)
@@ -331,16 +453,10 @@ async def crawl_one(
                 tasks, packets, min_wait_ms=250, max_wait_ms=700, quiet_ms=200
             )
 
-        # Smart Event Wait: Chờ nếu gói tin phòng hoặc album chưa về (tối đa 5s)
-        start_wait = time.perf_counter()
-        while time.perf_counter() - start_wait < 5.0:
-            urls = [p.get("url", "") for p in packets]
-            has_rooms = any("getHotelRoomListOversea" in u for u in urls)
-            has_album = any("ctgethotelalbum" in u for u in urls)
-            has_pop = any("getHotelRoomPopInfoPCOnline" in u for u in urls)
-            if has_rooms and has_album and has_pop:
-                break
-            await asyncio.sleep(0.2)
+        # Danh sách phòng nạp chậm hơn ảnh/tiện ích: cuộn xong mà chưa thấy
+        # getHotelRoomList thì phải chờ thêm, nếu không sẽ ghi nhận "không có
+        # phòng" trong khi thực ra chỉ là chưa kịp về.
+        await _wait_for_room_list(tasks, packets, page)
 
         # JSON-LD thường chứa mô tả/ảnh ngay cả khi API đổi endpoint.
         for script in await page.locator("script[type='application/ld+json']").all_text_contents():
@@ -349,6 +465,14 @@ async def crawl_one(
                                 "response": json.loads(script)})
             except Exception:
                 pass
+
+        from hotel_description import capture_hotel_description
+        introduction = await capture_hotel_description(page, hotel_id)
+        if introduction:
+            packets.append({
+                "url": "embedded:hotel-description", "method": "EMBEDDED", "status": 200,
+                "response": introduction,
+            })
 
         # Some markets keep the localized hotel introduction only in page
         # metadata rather than the captured room/facility APIs.
@@ -382,31 +506,50 @@ async def crawl_one(
         if tasks:
             await asyncio.gather(*list(tasks), return_exceptions=True)
         normalized = extract_detail(packets, hotel_id, url, currency, locale)
-        spider_code = next(
-            (code for packet in packets
-             if (code := _spider_error_code(packet.get("response"))) is not None),
+        blocked = next(
+            (reason for packet in packets
+             if (reason := _blocked_reason(packet.get("response"))) is not None),
             None,
         )
         has_detail = _has_detail(normalized)
+        rooms = normalized.get("rooms") or []
+        # Thiếu phòng thì CHƯA coi là xong: ảnh và tiện nghi vẫn về bình thường
+        # ngay cả khi bị chặn phần phòng, nên nếu chỉ dựa vào "có dữ liệu gì đó"
+        # thì hotel bị chặn sẽ được ghi nhận thành công rồi bỏ qua mãi mãi.
+        sold_out = bool(not rooms and _rooms_sold_out(packets))
+        room_attempts = 0 if (rooms or sold_out) else _previous_room_attempts(raw_path) + 1
+        rooms_exhausted = bool(not rooms and room_attempts >= MAX_ROOM_ATTEMPTS)
         normalized.update({
             "locale": locale,
             "currency": currency,
             "check_in": checkin,
             "check_out": checkout,
             "crawled_at": datetime.now().isoformat(timespec="seconds"),
-            "success": has_detail and spider_code is None,
+            "rooms_missing": not bool(rooms),
+            "rooms_sold_out": sold_out,
+            "room_attempts": room_attempts,
+            # Phân biệt "bị chặn / trang hỏng" với "chỉ thiếu phòng". Vòng lặp
+            # ngoài dùng cờ này để quyết định có dừng cả run hay không.
+            "blocked": blocked,
+            "page_dead": not has_detail,
+            "success": (
+                has_detail and blocked is None
+                and (bool(rooms) or sold_out or rooms_exhausted)
+            ),
             "error": (
-                f"Trip.com anti-crawler code {spider_code}" if spider_code
-                else None if has_detail
+                f"Trip.com chặn: {blocked}" if blocked
                 else "có JSON response nhưng không trích được dữ liệu detail"
+                if not has_detail
+                else None if sold_out
+                else f"không lấy được phòng (lần {room_attempts}/{MAX_ROOM_ATTEMPTS})"
+                if not rooms and not rooms_exhausted
+                else None
             ),
         })
         normalized["name"] = normalized.get("name") or target.get("name")
         normalized["address"] = normalized.get("address") or target.get("address")
         raw = {"target": target, "url": url, "normalized": normalized, "responses": packets}
-        raw_path.write_text(
-            json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        raw_store.write(raw_path, raw)
         return normalized
     except Exception as exc:
         result = {
@@ -424,19 +567,18 @@ async def crawl_one(
             "images": [], "amenities": [], "rooms": [],
         }
         error_path = raw_path
-        if raw_path.exists():
+        if raw_store.exists(raw_path):
             try:
-                previous = json.loads(raw_path.read_text(encoding="utf-8"))
+                previous = raw_store.read(raw_path)
                 if (previous.get("normalized") or {}).get("success"):
                     error_path = raw_path.with_name(
                         f"{hotel_id}.failed.{datetime.now():%Y%m%d_%H%M%S}.json"
                     )
             except Exception:
                 pass
-        error_path.write_text(
-            json.dumps({"target": target, "normalized": result, "responses": packets},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        raw_store.write(
+            error_path,
+            {"target": target, "normalized": result, "responses": packets},
         )
         return result
     finally:
@@ -455,14 +597,14 @@ def _load_cached(
     if (
         allow_legacy
         and
-        not path.exists() and locale == "vi-VN" and currency.upper() == "VND"
-        and legacy_path.exists()
+        not raw_store.exists(path) and locale == "vi-VN" and currency.upper() == "VND"
+        and raw_store.exists(legacy_path)
     ):
         path = legacy_path
-    if not path.exists():
+    if not raw_store.exists(path):
         return None
     try:
-        dump = json.loads(path.read_text(encoding="utf-8"))
+        dump = raw_store.read(path)
         value = dump.get("normalized")
     except Exception:
         return None
@@ -482,17 +624,30 @@ def _load_cached(
             )
             value.update(fresh)
             dump["normalized"] = value
-            path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
+            raw_store.write(path, dump)
         except Exception:
             return None
     if value:
         value.setdefault("locale", locale)
         value.setdefault("currency", currency)
     has_spider_error = any(
-        _spider_error_code(packet.get("response")) is not None
+        _blocked_reason(packet.get("response")) is not None
         for packet in (dump.get("responses") or [])
     )
-    return value if value and value.get("success") and _has_detail(value) and not has_spider_error else None
+    # Raw ghi bởi bản code cũ có success=True dù không có phòng (lúc đó chỉ cần
+    # có ảnh/tiện ích là tính xong). Không nhận lại những bản đó, nếu không
+    # chúng bị bỏ qua vĩnh viễn và DB thiếu phòng mà không ai biết.
+    rooms_pending = bool(
+        value
+        and not (value.get("rooms") or [])
+        and int(value.get("room_attempts") or 0) < MAX_ROOM_ATTEMPTS
+    )
+    return (
+        value
+        if value and value.get("success") and _has_detail(value)
+        and not has_spider_error and not rooms_pending
+        else None
+    )
 
 
 def save_manifest(
@@ -554,6 +709,34 @@ async def main(args: argparse.Namespace) -> None:
     )
     print("Không chạy song song với crawl_api.py (dùng chung browser_profile).")
 
+    # Quét cache TRƯỚC khi mở trình duyệt. Với vài nghìn file raw, bước này
+    # mất nhiều phút; mở Chromium rồi để nó nằm không suốt thời gian đó chỉ
+    # tổ rước rủi ro cửa sổ bị đóng/chết trước khi cào được hotel nào.
+    pending: list[tuple[int, dict]] = []
+    for index, target in enumerate(targets, 1):
+        cached = (
+            _load_cached(
+                target["trip_hotel_id"],
+                locale,
+                currency,
+                allow_legacy=not args.ignore_legacy_cache,
+            )
+            if not args.no_resume else None
+        )
+        if cached:
+            detail_slots[index - 1] = cached
+            continue
+        pending.append((index, target))
+    print(f"Cache: {len(targets) - len(pending)} hotel đã có, còn {len(pending)} cần cào.")
+
+    if not pending:
+        details = [value for value in detail_slots if value is not None]
+        success = sum(1 for row in details if row.get("success"))
+        save_manifest(out, source, details, True, locale, currency)
+        print(f"→ {success}/{len(details)} detail thành công → {out}")
+        print(f"Nạp DB: python src/db/detail_loader.py {out.name}")
+        return
+
     async with async_playwright() as p:
         profile_path = Path(args.profile_dir) if args.profile_dir else config.profile_dir(locale, currency)
         if not profile_path.is_absolute():
@@ -585,32 +768,25 @@ async def main(args: argparse.Namespace) -> None:
                 await route.continue_()
 
         await ctx.route("**/*", block_heavy_resources)
-        pending: list[tuple[int, dict]] = []
-        for index, target in enumerate(targets, 1):
-            cached = (
-                _load_cached(
-                    target["trip_hotel_id"],
-                    locale,
-                    currency,
-                    allow_legacy=not args.ignore_legacy_cache,
-                )
-                if not args.no_resume else None
-            )
-            if cached:
-                detail_slots[index - 1] = cached
-                print(f"[{index}/{len(targets)}] cache {target['trip_hotel_id']}")
-                continue
-            pending.append((index, target))
 
         queue: asyncio.Queue[tuple[int, dict]] = asyncio.Queue()
         for job in pending:
             queue.put_nowait(job)
         crawled_count = 0
         consecutive_errors = 0
+        consecutive_roomless = 0
+        # Thiếu phòng KHÔNG phải dấu hiệu bị chặn: nhiều khách sạn hết phòng
+        # hoặc khối phòng không nạp kịp. Chỉ dừng khi thiếu phòng kéo dài hẳn.
+        roomless_limit = max(args.max_consecutive_errors * 6, 30)
+
+        browser_gone = False
 
         async def worker() -> None:
-            nonlocal crawled_count, consecutive_errors
+            nonlocal crawled_count, consecutive_errors, consecutive_roomless
+            nonlocal browser_gone
             while True:
+                if browser_gone:
+                    return
                 try:
                     index, target = queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -618,18 +794,49 @@ async def main(args: argparse.Namespace) -> None:
                 try:
                     # Jitter nhẹ khi mở tab mới để không trùng khít miligiây
                     await asyncio.sleep(random.uniform(0.1, 0.4))
-                    row = await crawl_one(
-                        ctx, target, checkin, checkout, locale, currency
-                    )
+                    try:
+                        row = await crawl_one(
+                            ctx, target, checkin, checkout, locale, currency
+                        )
+                    except BrowserError as exc:
+                        if not _browser_closed(exc):
+                            raise
+                        # Cửa sổ Chromium đã đóng (người dùng tắt tay, hoặc nó
+                        # tự chết). Không cứu được, nhưng phải dừng êm để còn
+                        # ghi manifest — raw từng hotel thì đã nằm trên đĩa rồi.
+                        browser_gone = True
+                        print(
+                            "\nTrình duyệt đã đóng giữa chừng — dừng lại và lưu "
+                            "những gì đã cào.\n"
+                            "  Nếu anh không tự tắt cửa sổ Chromium thì nhiều khả "
+                            "năng nó hết RAM.\n"
+                            "  Chạy lại lệnh cũ là nó cào tiếp từ chỗ dở."
+                        )
+                        return
                     detail_slots[index - 1] = row
                     crawled_count += 1
-                    if row.get("success"):
-                        consecutive_errors = 0
-                    else:
+                    # Chỉ "bị chặn" hoặc "trang không ra gì" mới tính là lỗi
+                    # nặng. Thiếu mỗi phòng thì đếm riêng, ngưỡng cao hơn.
+                    hard_error = bool(row.get("blocked")) or bool(row.get("page_dead"))
+                    if hard_error:
                         consecutive_errors += 1
+                    else:
+                        consecutive_errors = 0
+                    # "Hết phòng" là câu trả lời dứt khoát của Trip.com, không
+                    # phải lấy hụt — không tính vào chuỗi thiếu phòng.
+                    if row.get("rooms") or row.get("rooms_sold_out"):
+                        consecutive_roomless = 0
+                    else:
+                        consecutive_roomless += 1
+                    status = (
+                        "LỖI" if hard_error
+                        else "OK" if row.get("rooms")
+                        else "HẾT PHÒNG" if row.get("rooms_sold_out")
+                        else "THIẾU PHÒNG"
+                    )
                     print(
                         f"[{index}/{len(targets)}] {target['trip_hotel_id']} "
-                        f"{'OK' if row.get('success') else 'LỖI'} | "
+                        f"{status} | "
                         f"ảnh={len(row.get('images') or [])}, "
                         f"tiện ích={len(row.get('amenities') or [])}, "
                         f"phòng={len(row.get('rooms') or [])}"
@@ -644,8 +851,24 @@ async def main(args: argparse.Namespace) -> None:
                         print(f"  checkpoint → {out}")
                     if consecutive_errors >= args.max_consecutive_errors:
                         print(
-                            f"Dừng an toàn: {consecutive_errors} hotel liên tiếp lỗi; "
-                            "hãy kiểm tra profile hoặc mã chống crawler trước khi chạy tiếp."
+                            f"Dừng an toàn: {consecutive_errors} hotel liên tiếp lỗi."
+                        )
+                        if "chặn" in (row.get("error") or ""):
+                            print(
+                                f"  Nguyên nhân: {row.get('error')}\n"
+                                "  Trip.com đang chặn. NGHỈ vài tiếng rồi chạy lại —\n"
+                                "  thực tế đo được: nghỉ qua đêm thì tỉ lệ thành công\n"
+                                "  hồi từ 14% lên 99%. Chạy cố chỉ làm nặng thêm."
+                            )
+                        else:
+                            print("  Kiểm tra profile trình duyệt trước khi chạy tiếp.")
+                        return
+                    if consecutive_roomless >= roomless_limit:
+                        print(
+                            f"Dừng: {consecutive_roomless} hotel liên tiếp không ra "
+                            "phòng, trong khi ảnh và tiện ích vẫn về bình thường.\n"
+                            "  Trip.com nhiều khả năng đang giới hạn riêng API phòng.\n"
+                            "  Nghỉ vài tiếng rồi chạy lại với --missing-only."
                         )
                         return
                     await asyncio.sleep(
@@ -658,7 +881,12 @@ async def main(args: argparse.Namespace) -> None:
         if worker_count:
             await asyncio.gather(*(worker() for _ in range(worker_count)))
 
-        await ctx.close()
+        # Trình duyệt chết rồi thì close() cũng ném lỗi — đừng để nó cướp mất
+        # bước ghi manifest bên dưới.
+        try:
+            await ctx.close()
+        except Exception:
+            pass
 
     details = [value for value in detail_slots if value is not None]
     success = sum(1 for row in details if row.get("success"))
