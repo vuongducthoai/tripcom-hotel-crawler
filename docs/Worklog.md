@@ -1,5 +1,17 @@
 # Project Worklog
 
+### 2026-09-21
+
+| Member | Task | Status | Output |
+| :--- | :--- | :--- | :--- |
+| Vương Đức Thoại | Xây dựng giao diện web điều khiển và theo dõi tiến độ crawl thời gian thực (`web/crawl.html`, `src/crawl_jobs.py`, `src/crawl_coverage.py`), module nén dữ liệu raw capture bằng gzip (`src/raw_store.py`, `scripts/compress_raw.py`), bóc tách mô tả khách sạn (`src/hotel_description.py`), cơ chế nhấp nháy cuộn chờ phòng (`_wait_for_room_list`) và công cụ kiểm toán độ phủ dữ liệu (`scripts/audit_data.py`, `scripts/gap_report.sql`) | ✅ Done | [`web/crawl.html`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/web/crawl.html), [`src/crawl_jobs.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/crawl_jobs.py), [`src/raw_store.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/raw_store.py), [`src/hotel_description.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/hotel_description.py); Commits [`4986b77`](https://github.com/vuongducthoai/tripcom-hotel-crawler/commit/4986b779a7924652baabac8e3c31e499e33a7af4), [`f9ae9a7`](https://github.com/vuongducthoai/tripcom-hotel-crawler/commit/f9ae9a723057bc64208dc5e1bfce8073f9990794), [`73b9b4a`](https://github.com/vuongducthoai/tripcom-hotel-crawler/commit/73b9b4a8a7ff96d237ba89ee93993a37dde42485) |
+| Trần Đăng Nguyên | Đồng bộ và hợp nhất các bản cập nhật mới nhất từ `origin/main` vào nhánh `CrawlingIssue`, phân tích và giải quyết triệt để xung đột merge tại `src/crawl_detail.py` (dung hợp cơ chế chờ danh sách phòng `_wait_for_room_list` với khoảng trễ jitter đa tab và bắt lỗi crash trình duyệt `BrowserError`) | ✅ Done | [`src/crawl_detail.py`](https://github.com/vuongducthoai/tripcom-hotel-crawler/blob/CrawlingIssue/src/crawl_detail.py); Commit [`34634f7`](https://github.com/vuongducthoai/tripcom-hotel-crawler/commit/34634f768a94d5c7c9e894dbadf48f1d69c6d590) |
+| Trần Đăng Nguyên | Chạy kiểm thử hồi quy toàn diện toàn bộ test suite dự án (`tests/`), nghiệm thu 73/73 unit tests đạt chuẩn tuyệt đối, đảm bảo tính toàn vẹn của pipeline cào dữ liệu và các API quản trị job mới | ✅ Done | [`tests/`](https://github.com/vuongducthoai/tripcom-hotel-crawler/tree/CrawlingIssue/tests) (73/73 tests passed) |
+
+**Tổng kết ngày**: Hoàn thành đồng bộ và hợp nhất toàn bộ các tính năng lớn từ `main` sang nhánh `CrawlingIssue`: hệ thống theo dõi tiến độ cào qua web trực quan (`web/crawl.html`), tối ưu dung lượng lưu trữ thô qua chuẩn nén gzip (`raw_store.py`), cải tiến cơ chế chờ tải danh sách phòng thông minh (`_wait_for_room_list`) kết hợp xử lý ngắt an toàn khi Chromium gặp sự cố. Xử lý sạch xung đột mã nguồn và kiểm thử đạt chuẩn 73/73 unit tests.
+
+---
+
 ### 2026-09-18
 
 | Member | Task | Status | Output |
