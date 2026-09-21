@@ -10,7 +10,7 @@ import hashlib
 import re
 import urllib.parse
 from typing import Any, Iterator
-from hotel_description import description_text, find_description_info
+from hotel_description import clean_description, description_text, find_description_info
 
 IMAGE_RE = re.compile(r"^https?://[^\s]+(?:\.(?:jpe?g|png|webp|avif)(?:\?|$)|tripcdn)", re.I)
 NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
@@ -770,7 +770,7 @@ def extract_detail(
                     "room", "policy", "faq", "comment", "review", "rating", "hotelList".lower(),
                 ))
                 if property_context and not unrelated_context and leaf in {"description", "hoteldescription", "descriptiontext", "introduction"}:
-                    text = " ".join(value.split())
+                    text = clean_description(value) or ""
                     generic_markers = (
                         "bạn đang tìm đặt phòng",
                         "hãy chọn phòng cho bạn",

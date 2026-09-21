@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,15 +39,46 @@ def captured_at(value: str | None) -> datetime:
     return result
 
 
-def latest_file() -> Path:
+def _market_token(locale: str) -> str:
+    """'en-US' -> 'enUS', khớp với tên file crawl_detail/reparse đặt ra."""
+    return locale.replace("-", "")
+
+
+def latest_file(locale: str | None = None) -> Path:
     files = sorted(config.DATA_DIR.glob("hotel_details_*.json"), key=lambda p: p.stat().st_mtime)
+    files = [p for p in files if p.stat().st_size]  # bỏ file rỗng do crash
+    if locale:
+        # Có --locale thì chỉ lấy manifest đúng thị trường đó. Trước đây hàm
+        # này lấy file mới nhất bất kể ngôn ngữ: đang cào VI (ghi checkpoint
+        # liên tục) mà chạy loader EN là nó vớ checkpoint VI để nạp.
+        token = f"_{_market_token(locale)}_"
+        files = [p for p in files if token in p.name]
     if not files:
-        raise SystemExit("Chưa có hotel_details_*.json. Chạy crawl_detail.py trước.")
+        raise SystemExit(
+            "Chưa có hotel_details_*.json"
+            + (f" cho {locale}" if locale else "")
+            + ". Chạy crawl_detail.py hoặc reparse_details.py trước."
+        )
     return files[-1]
 
 
-def resolve_file(value: str | None) -> Path:
-    path = Path(value) if value else latest_file()
+def _manifest_head(path: Path) -> dict:
+    """Đọc vài KB đầu manifest để lấy locale/complete mà không nuốt cả file."""
+    with path.open("rb") as handle:
+        head = handle.read(4096).decode("utf-8", errors="replace")
+    info: dict = {}
+    for key in ("locale", "currency"):
+        found = re.search(rf'"{key}"\s*:\s*"([^"]*)"', head)
+        if found:
+            info[key] = found.group(1)
+    found = re.search(r'"complete"\s*:\s*(true|false)', head)
+    if found:
+        info["complete"] = found.group(1) == "true"
+    return info
+
+
+def resolve_file(value: str | None, locale: str | None = None) -> Path:
+    path = Path(value) if value else latest_file(locale)
     if not path.is_absolute() and not path.exists():
         path = config.DATA_DIR / path.name
     if not path.exists():
@@ -54,8 +86,31 @@ def resolve_file(value: str | None) -> Path:
     return path
 
 
+def check_manifest(path: Path, args: argparse.Namespace) -> None:
+    """Chặn trước khi nạp: sai ngôn ngữ, hoặc nạp nhầm checkpoint đang cào dở."""
+    head = _manifest_head(path)
+    file_locale = head.get("locale")
+    if args.locale and file_locale and not getattr(args, "force_locale", False):
+        if language_key(args.locale) != language_key(file_locale):
+            raise SystemExit(
+                f"DỪNG: file {path.name} là dữ liệu {file_locale}, nhưng anh "
+                f"yêu cầu nạp dưới nhãn {args.locale}.\n"
+                "  Nạp tiếp sẽ ghi nội dung ngôn ngữ này vào nhầm cột ngôn ngữ kia.\n"
+                "  Chỉ rõ đúng file, ví dụ:\n"
+                "    python src/db/detail_loader.py hotel_details_reparsed_enUS_USD_<...>.json\n"
+                "  Nếu thật sự cố ý, thêm --force-locale."
+            )
+    if head.get("complete") is False:
+        print(
+            f"CẢNH BÁO: {path.name} là checkpoint CHƯA hoàn tất (complete=false).\n"
+            "  Nếu crawl vẫn đang chạy, file này chỉ là một phần. Thường nên chạy\n"
+            "  reparse_details.py để gom đủ raw rồi nạp file reparsed thay vì file này."
+        )
+
+
 def main(args: argparse.Namespace) -> None:
-    path = resolve_file(args.file)
+    path = resolve_file(args.file, args.locale)
+    check_manifest(path, args)
     payload = json.loads(path.read_text(encoding="utf-8"))
     details = payload.get("details") or []
     request_locale = args.locale or payload.get("locale") or "vi-VN"
@@ -649,7 +704,9 @@ if __name__ == "__main__":
     ap.add_argument("file", nargs="?", help="hotel_details_*.json trong output/data/")
     ap.add_argument("--prices", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--no-prices", action="store_true", help="không ghi snapshot hotel_prices")
-    ap.add_argument("--locale", help="ghi đè locale trong manifest, ví dụ en-US")
+    ap.add_argument("--locale", help="chọn manifest theo thị trường, ví dụ en-US; không cho nạp file khác ngôn ngữ")
+    ap.add_argument("--force-locale", action="store_true",
+                    help="cố ý nạp manifest dưới nhãn ngôn ngữ khác (hiếm khi cần)")
     ap.add_argument("--currency", help="ghi đè currency trong manifest, ví dụ USD")
     ap.add_argument("--dry-run", action="store_true", help="kiểm tra SQL rồi rollback, không ghi DB")
     ap.add_argument("--preserve-hotel-amenities", action="store_true",
