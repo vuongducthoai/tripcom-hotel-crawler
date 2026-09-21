@@ -4,6 +4,34 @@ import json
 import re
 
 
+EMPTY_DESCRIPTION_VALUES = {'null', 'none', 'undefined', 'n/a', 'na', '-'}
+MARKETING_DESCRIPTION_MARKERS = (
+    'đại lý du lịch trực tuyến hàng đầu thế giới',
+    'chuyến bay tới hơn 5.000 thành phố',
+    'bạn đang tìm đặt phòng',
+    'hãy chọn phòng cho bạn',
+    'so sánh giá cả và đặt',
+    'world-leading online travel agency',
+    'flights to over 5,000 cities',
+    'looking to book',
+    'compare prices and book',
+    'compare the latest room rates',
+)
+
+
+def clean_description(value):
+    """Return usable property prose; reject sentinels and Trip marketing SEO."""
+    if not isinstance(value, str):
+        return None
+    text = ' '.join(html.unescape(re.sub(r'<[^>]+>', ' ', value)).split())
+    folded = text.casefold()
+    if not text or folded in EMPTY_DESCRIPTION_VALUES:
+        return None
+    if any(marker in folded for marker in MARKETING_DESCRIPTION_MARKERS):
+        return None
+    return text
+
+
 def description_text(info):
     if not isinstance(info, dict):
         return None
@@ -13,9 +41,7 @@ def description_text(info):
         values = [info.get('description')]
     paragraphs = []
     for value in values:
-        if not isinstance(value, str):
-            continue
-        text = ' '.join(html.unescape(re.sub(r'<[^>]+>', ' ', value)).split())
+        text = clean_description(value)
         if text and text not in paragraphs:
             paragraphs.append(text)
     return '\n\n'.join(paragraphs) or None

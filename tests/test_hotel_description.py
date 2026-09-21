@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from hotel_description import description_from_scripts, description_text
+from hotel_description import clean_description, description_from_scripts, description_text
 from detail_extract import extract_detail
 
 
@@ -15,6 +15,27 @@ class HotelDescriptionTests(unittest.TestCase):
             {'desc': '<p>First &amp; second.</p>'},
         ]}
         self.assertEqual(description_text(info), 'First & second.\n\nAnother paragraph.')
+
+    def test_rejects_null_sentinels_and_platform_marketing(self):
+        for value in ('null', ' NULL ', 'None', 'undefined', 'N/A', '-'):
+            self.assertIsNone(clean_description(value))
+        marketing = ('Đại lý du lịch trực tuyến hàng đầu thế giới với các chuyến bay '
+                     'tới hơn 5.000 thành phố và 1,2 triệu khách sạn.')
+        self.assertIsNone(clean_description(marketing))
+        self.assertIsNone(description_text({'sectionList': [
+            {'desc': 'null'}, {'desc': marketing},
+        ]}))
+
+    def test_fallback_metadata_uses_same_filter(self):
+        for value in (
+            'null',
+            'Đại lý du lịch trực tuyến hàng đầu thế giới với các chuyến bay tới hơn 5.000 thành phố.',
+        ):
+            result = extract_detail(
+                [{'url': 'embedded:page-meta', 'response': {'description': value}}],
+                '123', 'https://example.test', 'VND', 'vi-VN',
+            )
+            self.assertIsNone(result['description'])
 
     def test_decodes_flight_and_checks_property_identity(self):
         data = {'hotelBaseInfo': {'masterHotelId': 123},
