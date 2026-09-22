@@ -84,13 +84,17 @@ def build_list_url(
 ) -> str:
     """Dựng thẳng URL trang danh sách, khỏi phải gõ ô tìm kiếm + click gợi ý."""
     name = city_name_for_locale(city, locale)
-    country_name = "Vietnam" if locale.lower().startswith("en") else "Việt Nam"
+    # Thành phố nước ngoài mang theo mã + tên quốc gia riêng (xem --country-id);
+    # thành phố VN giữ nguyên như cũ.
+    english = locale.lower().startswith("en")
+    country_name = (city.get("country_name_en") if english else city.get("country_name")) \
+        or city.get("country_name_en") or ("Vietnam" if english else "Việt Nam")
     params = {
         "flexType": "1",
         "cityId": str(city["id"]),
         "provinceId": "0",
         "districtId": "0",
-        "countryId": "111",
+        "countryId": str(city.get("country_id") or 111),
         "cityName": name,
         "destName": f"{name}, {country_name}",
         "searchWord": name,
@@ -729,12 +733,20 @@ async def main(args: argparse.Namespace) -> None:
     locale = args.locale or config.LOCALE
     currency = (args.currency or config.CURRENCY).upper()
     cities = config.VN_CITIES
-    if args.city_id:
+    if args.city_id and args.city_name:
+        # Thành phố ngoài danh sách VN (vd Copenhagen): tự dựng từ tham số.
+        cities = [{
+            "id": args.city_id, "name": args.city_name, "name_en": args.city_name,
+            "country_id": args.country_id, "country_name": args.country_name,
+            "country_name_en": args.country_name,
+        }]
+    elif args.city_id:
         cities = [c for c in cities if c["id"] == args.city_id]
     elif args.city:
         cities = [c for c in cities if args.city.lower() in c["name"].lower()]
     if not cities:
-        raise SystemExit("Không khớp thành phố nào trong config.VN_CITIES.")
+        raise SystemExit("Không khớp thành phố nào trong config.VN_CITIES. "
+                         "Thành phố nước ngoài: thêm --city-name, --country-id, --country-name.")
 
     max_pages = args.max_pages or config.MAX_API_PAGES
     profile_path = Path(args.profile_dir) if args.profile_dir else config.profile_dir(locale, currency)
@@ -780,6 +792,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--city", help="lọc theo tên (khớp một phần, không phân biệt hoa thường)")
     ap.add_argument("--city-id", type=int, help="chỉ chạy đúng 1 cityId")
+    ap.add_argument("--city-name", help="tên thành phố ngoài VN_CITIES, dùng kèm --city-id (vd Copenhagen)")
+    ap.add_argument("--country-id", type=int, help="mã quốc gia Trip.com của thành phố đó (lấy từ URL trang danh sách)")
+    ap.add_argument("--country-name", help="tên quốc gia, vd Denmark")
     ap.add_argument("--max-pages", type=int, help="giới hạn số trang API (chạy thử nhanh)")
     ap.add_argument("--locale", default=config.LOCALE, help="Trip.com locale, ví dụ vi-VN hoặc en-US")
     ap.add_argument("--currency", default=config.CURRENCY, help="Mã tiền tệ, ví dụ VND hoặc USD")
@@ -794,6 +809,8 @@ if __name__ == "__main__":
         help="dừng khi đạt số trip_hotel_id duy nhất này (vd 6000)",
     )
     args = ap.parse_args()
+    if args.city_name and not (args.city_id and args.country_id and args.country_name):
+        ap.error("--city-name cần đi kèm --city-id, --country-id và --country-name")
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())

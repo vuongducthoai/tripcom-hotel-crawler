@@ -27,6 +27,7 @@ import raw_store
 from db.i18n import language_key
 from detail_extract import PARSER_VERSION, extract_detail
 from hotel_facilities import capture_hotel_facilities
+from api_extract import _next_f_text
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -366,6 +367,67 @@ async def _wait_for_room_list(
     return _has_room_list(packets)
 
 
+# Schema v2 cần khối hotelDetailResponse của trang (sao, tọa độ, thành phố,
+# chính sách có cấu trúc…). Khối này nằm sẵn trong HTML (dữ liệu Next.js
+# self.__next_f), không phải một API riêng — đọc thẳng từ trang, không tốn
+# thêm request nào tới Trip.com.
+DETAIL_BLOCK_URL = "embedded:hotel-detail-response"
+_JSON = json.JSONDecoder()
+
+
+async def _capture_detail_response(page) -> dict | None:
+    try:
+        text = _next_f_text(await page.content())
+    except Exception:
+        return None
+    anchor = '"hotelDetailResponse":'
+    index = text.find(anchor)
+    if index < 0:
+        return None
+    try:
+        value, _ = _JSON.raw_decode(text, index + len(anchor))
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) and value.get("hotelBaseInfo") else None
+
+
+def default_stay() -> tuple[str, str]:
+    """Ngày ở mặc định: thứ Hai của tuần sau nữa, ở 1 đêm.
+
+    Trước đây mặc định là "ngày mai", nên bản Việt và bản Anh cào vào hai
+    ngày khác nhau sẽ có hai ngày nhận phòng khác nhau → gói giá USD và VND
+    không ghép được (≈93% hotel bị lệch). Mốc thứ Hai tuần sau nữa giữ nguyên
+    suốt cả tuần (luôn cách 8–14 ngày), nên cào hai thứ tiếng trong cùng tuần
+    là trùng ngày.
+    """
+    today = datetime.now().date()
+    monday = today - timedelta(days=today.weekday()) + timedelta(days=14)
+    return monday.isoformat(), (monday + timedelta(days=1)).isoformat()
+
+
+OTHER_MARKET = {"vi-VN": ("en-US", "USD"), "en-US": ("vi-VN", "VND")}
+
+
+def paired_stay(hotel_id: str, locale: str, currency: str,
+                checkin: str, checkout: str) -> tuple[str, str]:
+    """Nếu bản thứ tiếng kia của hotel này đã cào với một ngày ở còn ở tương lai
+    thì dùng lại đúng ngày đó, để hai bản ghép được gói giá với nhau."""
+    other = OTHER_MARKET.get(locale)
+    if not other:
+        return checkin, checkout
+    try:
+        normalized = raw_store.read(market_raw_dir(*other) / f"{hotel_id}.json").get("normalized") or {}
+    except Exception:
+        return checkin, checkout
+    other_in, other_out = normalized.get("check_in"), normalized.get("check_out")
+    try:
+        if other_in and other_out and datetime.fromisoformat(other_in).date() > datetime.now().date():
+            return other_in, other_out
+    except ValueError:
+        pass
+    return checkin, checkout
+
+
 def market_raw_dir(locale: str, currency: str) -> Path:
     path = RAW_DIR / locale / currency.upper()
     path.mkdir(parents=True, exist_ok=True)
@@ -488,6 +550,13 @@ async def crawl_one(
                 "response": facilities,
             })
 
+        detail_block = await _capture_detail_response(page)
+        if detail_block:
+            packets.append({
+                "url": DETAIL_BLOCK_URL, "method": "EMBEDDED", "status": 200,
+                "response": detail_block,
+            })
+
         policy_text = await _capture_hotel_policy_text(page, locale)
         if policy_text:
             packets.append({
@@ -503,6 +572,8 @@ async def crawl_one(
              if (reason := _blocked_reason(packet.get("response"))) is not None),
             None,
         )
+        if blocked is None and "/account/signin" in (page.url or "").lower():
+            blocked = "bị chuyển sang trang đăng nhập"
         has_detail = _has_detail(normalized)
         rooms = normalized.get("rooms") or []
         # Thiếu phòng thì CHƯA coi là xong: ảnh và tiện nghi vẫn về bình thường
@@ -520,6 +591,7 @@ async def crawl_one(
             "rooms_missing": not bool(rooms),
             "rooms_sold_out": sold_out,
             "room_attempts": room_attempts,
+            "has_detail_block": bool(detail_block),
             # Phân biệt "bị chặn / trang hỏng" với "chỉ thiếu phòng". Vòng lặp
             # ngoài dùng cờ này để quyết định có dừng cả run hay không.
             "blocked": blocked,
@@ -541,7 +613,18 @@ async def crawl_one(
         normalized["name"] = normalized.get("name") or target.get("name")
         normalized["address"] = normalized.get("address") or target.get("address")
         raw = {"target": target, "url": url, "normalized": normalized, "responses": packets}
-        raw_store.write(raw_path, raw)
+        # Bị chặn / trang hỏng thì KHÔNG ghi đè raw tốt của lần cào trước —
+        # lưu bản hỏng sang tên .failed.<thời điểm> (giống nhánh lỗi bên dưới).
+        save_path = raw_path
+        if (blocked or not has_detail) and raw_store.exists(raw_path):
+            try:
+                if (raw_store.read(raw_path).get("normalized") or {}).get("success"):
+                    save_path = raw_path.with_name(
+                        f"{hotel_id}.failed.{datetime.now():%Y%m%d_%H%M%S}.json"
+                    )
+            except Exception:
+                pass
+        raw_store.write(save_path, raw)
         return normalized
     except Exception as exc:
         result = {
@@ -583,6 +666,7 @@ def _load_cached(
     currency: str,
     *,
     allow_legacy: bool = True,
+    require_detail_block: bool = False,
 ) -> dict | None:
     path = market_raw_dir(locale, currency) / f"{hotel_id}.json"
     legacy_path = RAW_DIR / f"{hotel_id}.json"
@@ -634,10 +718,15 @@ def _load_cached(
         and not (value.get("rooms") or [])
         and int(value.get("room_attempts") or 0) < MAX_ROOM_ATTEMPTS
     )
+    # --require-detail-block: raw cũ (chưa có khối hotelDetailResponse) coi
+    # như chưa cào, để cào lại cho schema v2.
+    missing_block = require_detail_block and not any(
+        packet.get("url") == DETAIL_BLOCK_URL for packet in (dump.get("responses") or [])
+    )
     return (
         value
         if value and value.get("success") and _has_detail(value)
-        and not has_spider_error and not rooms_pending
+        and not has_spider_error and not rooms_pending and not missing_block
         else None
     )
 
@@ -675,6 +764,25 @@ async def main(args: argparse.Namespace) -> None:
         targets_from_db(locale, missing_only=args.missing_only)
         if args.from_db else targets_from_file(args.file)
     )
+    forced_ids: set[str] = set()
+    if args.ids_file:
+        # Chỉ cào đúng các id trong file (mỗi dòng một id, bỏ dòng trống và
+        # dòng bắt đầu bằng #). Các id này LUÔN cào lại, bỏ qua cache — vì
+        # lý do lập danh sách chính là raw cũ của chúng đang thiếu thứ gì đó.
+        ids_path = Path(args.ids_file)
+        if not ids_path.is_absolute() and not ids_path.exists():
+            ids_path = config.ROOT / ids_path
+        if not ids_path.exists():
+            raise SystemExit(f"Không tìm thấy file id: {args.ids_file}")
+        forced_ids = {
+            line.strip() for line in ids_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        known = {str(t["trip_hotel_id"]) for t in targets}
+        unknown = forced_ids - known
+        targets = [t for t in targets if str(t["trip_hotel_id"]) in forced_ids]
+        print(f"--ids-file: {len(forced_ids)} id, khớp {len(targets)} hotel trong nguồn"
+              + (f", {len(unknown)} id không có trong nguồn (bỏ qua)" if unknown else ""))
     if args.start_after:
         targets = [t for t in targets if int(t["trip_hotel_id"]) > args.start_after]
     if args.limit:
@@ -686,9 +794,15 @@ async def main(args: argparse.Namespace) -> None:
     if args.max_consecutive_errors < 1:
         raise SystemExit("--max-consecutive-errors phải lớn hơn 0.")
 
-    tomorrow = datetime.now() + timedelta(days=1)
-    checkin = args.checkin or tomorrow.strftime("%Y-%m-%d")
-    checkout = args.checkout or (tomorrow + timedelta(days=1)).strftime("%Y-%m-%d")
+    default_in, default_out = default_stay()
+    checkin = args.checkin or default_in
+    checkout = args.checkout or (
+        (datetime.fromisoformat(args.checkin) + timedelta(days=1)).strftime("%Y-%m-%d")
+        if args.checkin else default_out
+    )
+    # Không truyền --checkin: từng hotel dùng lại ngày của bản thứ tiếng kia
+    # (nếu còn ở tương lai) để hai bản ghép được gói giá.
+    pair_dates = not args.checkin
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     market_tag = f"{locale}_{currency}".replace("-", "")
     out = config.DATA_DIR / f"hotel_details_{market_tag}_{stamp}.json"
@@ -705,14 +819,16 @@ async def main(args: argparse.Namespace) -> None:
     # tổ rước rủi ro cửa sổ bị đóng/chết trước khi cào được hotel nào.
     pending: list[tuple[int, dict]] = []
     for index, target in enumerate(targets, 1):
+        force = str(target["trip_hotel_id"]) in forced_ids
         cached = (
             _load_cached(
                 target["trip_hotel_id"],
                 locale,
                 currency,
                 allow_legacy=not args.ignore_legacy_cache,
+                require_detail_block=args.require_detail_block,
             )
-            if not args.no_resume else None
+            if not (args.no_resume or force) else None
         )
         if cached:
             detail_slots[index - 1] = cached
@@ -784,8 +900,13 @@ async def main(args: argparse.Namespace) -> None:
                     return
                 try:
                     try:
+                        stay_in, stay_out = (
+                            paired_stay(str(target["trip_hotel_id"]), locale, currency,
+                                        checkin, checkout)
+                            if pair_dates else (checkin, checkout)
+                        )
                         row = await crawl_one(
-                            ctx, target, checkin, checkout, locale, currency
+                            ctx, target, stay_in, stay_out, locale, currency
                         )
                     except BrowserError as exc:
                         if not _browser_closed(exc):
@@ -893,6 +1014,11 @@ if __name__ == "__main__":
         help="với --from-db, chỉ crawl hotel chưa có detail theo ngôn ngữ",
     )
     ap.add_argument("--limit", type=int, help="chỉ crawl N hotel đầu (nên dùng 1 để kiểm thử)")
+    ap.add_argument(
+        "--ids-file",
+        help="chỉ cào các trip_hotel_id trong file này (mỗi dòng một id), "
+             "luôn cào lại bỏ qua cache — tạo bằng scripts/find_missing.py",
+    )
     ap.add_argument("--start-after", type=int, help="chỉ lấy trip_hotel_id lớn hơn giá trị này")
     ap.add_argument("--checkin", help="YYYY-MM-DD")
     ap.add_argument("--checkout", help="YYYY-MM-DD")
@@ -904,6 +1030,10 @@ if __name__ == "__main__":
         help="dùng trình duyệt hệ thống thay cho Chrome for Testing",
     )
     ap.add_argument("--no-resume", action="store_true", help="crawl lại cả hotel đã có raw thành công")
+    ap.add_argument(
+        "--require-detail-block", action="store_true",
+        help="coi raw chưa có khối hotelDetailResponse (raw cũ) là chưa cào — dùng khi cào lại cho schema v2",
+    )
     ap.add_argument(
         "--workers", type=int, default=1,
         help="số hotel crawl song song (1-4, khuyến nghị 2)",

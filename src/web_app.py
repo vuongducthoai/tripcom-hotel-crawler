@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import os
 import json
 import mimetypes
 import sys
@@ -34,6 +35,12 @@ from crawl_jobs import RUNNER
 WEB_DIR = config.ROOT / "web"
 SCHEMA_CACHE_TTL = 30
 STATS_CACHE_TTL = 60
+# Khách sạn luôn hiện đầu danh sách (dùng cho demo). Đổi bằng biến môi trường
+# FEATURED_HOTEL_IDS="134013415,123967146" hoặc để trống để tắt.
+FEATURED_HOTEL_IDS = [
+    item.strip() for item in os.getenv("FEATURED_HOTEL_IDS", "134013415").split(",")
+    if item.strip()
+]
 _schema_cache: tuple[float, dict[str, Any]] | None = None
 _stats_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -424,7 +431,7 @@ def hotel_rows(query: dict[str, list[str]]) -> dict[str, Any]:
               )
         ) price ON TRUE
         WHERE {where_sql}
-        ORDER BY {order_sql}
+        ORDER BY CASE WHEN h.trip_hotel_id::text = ANY(%s) THEN 0 ELSE 1 END, {order_sql}
         LIMIT %s OFFSET %s
     """
     count_sql = f"SELECT count(*) AS total FROM hotels h WHERE {where_sql}"
@@ -433,7 +440,8 @@ def hotel_rows(query: dict[str, list[str]]) -> dict[str, Any]:
         total = int(cur.fetchone()["total"])
         cur.execute(
             select_sql,
-            [locale, locale, currency, currency, *where_params, limit, offset],
+            [locale, locale, currency, currency, *where_params,
+             FEATURED_HOTEL_IDS, limit, offset],
         )
         rows = [dict(row) for row in cur.fetchall()]
 
