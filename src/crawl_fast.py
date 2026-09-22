@@ -35,7 +35,16 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import config
 import raw_store
-from crawl_detail import detail_url, market_raw_dir, save_manifest, targets_from_db, targets_from_file
+from crawl_detail import (
+    DETAIL_BLOCK_URL,
+    default_stay,
+    detail_url,
+    market_raw_dir,
+    paired_stay,
+    save_manifest,
+    targets_from_db,
+    targets_from_file,
+)
 from engine.http_client_v2 import FastHttpClient
 from ssr_extractor import parse_hotel_html
 
@@ -49,6 +58,7 @@ def _load_cached_fast(
     locale: str,
     currency: str,
     allow_legacy: bool = True,
+    require_detail_block: bool = False,
 ) -> dict | None:
     raw_path = market_raw_dir(locale, currency) / f"{hotel_id}.json"
     legacy_path = RAW_DIR / f"{hotel_id}.json"
@@ -61,8 +71,13 @@ def _load_cached_fast(
     try:
         data = raw_store.read(raw_path)
         normalized = data.get("normalized")
-        if normalized and normalized.get("success"):
-            return normalized
+        if not (normalized and normalized.get("success")):
+            return None
+        if require_detail_block and not any(
+            packet.get("url") == DETAIL_BLOCK_URL for packet in (data.get("responses") or [])
+        ):
+            return None
+        return normalized
     except Exception:
         pass
     return None
@@ -137,7 +152,16 @@ async def crawl_one_fast(
             "normalized": normalized,
             "responses": packets,
         }
-        raw_store.write(raw_path, raw_data)
+        save_path = raw_path
+        if (not normalized.get("success") or not normalized.get("has_detail_block")) and raw_store.exists(raw_path):
+            try:
+                if (raw_store.read(raw_path).get("normalized") or {}).get("success"):
+                    save_path = raw_path.with_name(
+                        f"{hotel_id}.failed.{datetime.now():%Y%m%d_%H%M%S}.json"
+                    )
+            except Exception:
+                pass
+        raw_store.write(save_path, raw_data)
         return normalized
 
     except Exception as exc:
@@ -159,7 +183,16 @@ async def crawl_one_fast(
             "rooms": [],
             "fetch_time_sec": round(elapsed, 3),
         }
-        raw_store.write(raw_path, {"target": target, "normalized": result, "responses": []})
+        save_path = raw_path
+        if raw_store.exists(raw_path):
+            try:
+                if (raw_store.read(raw_path).get("normalized") or {}).get("success"):
+                    save_path = raw_path.with_name(
+                        f"{hotel_id}.failed.{datetime.now():%Y%m%d_%H%M%S}.json"
+                    )
+            except Exception:
+                pass
+        raw_store.write(save_path, {"target": target, "normalized": result, "responses": []})
         return result
 
 
@@ -185,6 +218,23 @@ async def main(args: argparse.Namespace) -> None:
     else:
         targets, source = targets_from_file(args.file)
 
+    forced_ids: set[str] = set()
+    if args.ids_file:
+        ids_path = Path(args.ids_file)
+        if not ids_path.is_absolute() and not ids_path.exists():
+            ids_path = config.ROOT / ids_path
+        if not ids_path.exists():
+            raise SystemExit(f"Không tìm thấy file id: {args.ids_file}")
+        forced_ids = {
+            line.strip() for line in ids_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+        known = {str(t["trip_hotel_id"]) for t in targets}
+        unknown = forced_ids - known
+        targets = [t for t in targets if str(t["trip_hotel_id"]) in forced_ids]
+        print(f"--ids-file: {len(forced_ids)} id, khớp {len(targets)} hotel trong nguồn"
+              + (f", {len(unknown)} id không có trong nguồn (bỏ qua)" if unknown else ""))
+
     if args.start_after:
         targets = [t for t in targets if int(t["trip_hotel_id"]) > args.start_after]
     if args.limit:
@@ -194,9 +244,13 @@ async def main(args: argparse.Namespace) -> None:
         print("Không có khách sạn nào cần cào.")
         return
 
-    tomorrow = datetime.now() + timedelta(days=1)
-    checkin = args.checkin or tomorrow.strftime("%Y-%m-%d")
-    checkout = args.checkout or (tomorrow + timedelta(days=1)).strftime("%Y-%m-%d")
+    default_in, default_out = default_stay()
+    checkin = args.checkin or default_in
+    checkout = args.checkout or (
+        (datetime.fromisoformat(args.checkin) + timedelta(days=1)).strftime("%Y-%m-%d")
+        if args.checkin else default_out
+    )
+    pair_dates = not args.checkin
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     market_tag = f"{locale}_{currency}".replace("-", "")
     out = config.DATA_DIR / f"hotel_details_{market_tag}_{stamp}.json"
@@ -207,6 +261,7 @@ async def main(args: argparse.Namespace) -> None:
     print(
         f"=== FAST HTTP CRAWLER (No-Browser) ===\n"
         f"Mục tiêu: {len(targets)} khách sạn | Thị trường: {locale}/{currency}\n"
+        f"Ngày ở: {checkin} → {checkout} (pair_dates={pair_dates})\n"
         f"Chế độ mạng: {'ROTATING PROXY' if proxy else 'DIRECT IP (Subcritical Safe)'}\n"
         f"Concurrency: {concurrency} workers | Delay: {delay_min}s - {delay_max}s"
     )
@@ -215,8 +270,14 @@ async def main(args: argparse.Namespace) -> None:
     pending: list[tuple[int, dict]] = []
 
     for index, target in enumerate(targets, start=1):
-        if not args.no_resume:
-            cached = _load_cached_fast(str(target["trip_hotel_id"]), locale, currency)
+        force = str(target["trip_hotel_id"]) in forced_ids
+        if not (args.no_resume or force):
+            cached = _load_cached_fast(
+                str(target["trip_hotel_id"]),
+                locale,
+                currency,
+                require_detail_block=args.require_detail_block,
+            )
             if cached:
                 detail_slots[index - 1] = cached
                 continue
@@ -252,11 +313,15 @@ async def main(args: argparse.Namespace) -> None:
             except asyncio.QueueEmpty:
                 return
 
+            stay_in, stay_out = (
+                paired_stay(str(target["trip_hotel_id"]), locale, currency, checkin, checkout)
+                if pair_dates else (checkin, checkout)
+            )
             row = await crawl_one_fast(
                 client=client,
                 target=target,
-                checkin=checkin,
-                checkout=checkout,
+                checkin=stay_in,
+                checkout=stay_out,
                 locale=locale,
                 currency=currency,
                 include_rooms=args.include_rooms,
@@ -333,6 +398,8 @@ if __name__ == "__main__":
     parser.add_argument("--apply-db", action="store_true", help="Tự động nạp vào DB sau khi cào xong")
     parser.add_argument("--include-rooms", action="store_true", help="Thu thập thêm phòng nếu có")
     parser.add_argument("--max-consecutive-errors", type=int, default=5, help="Số lỗi liên tiếp tối đa trước khi dừng")
+    parser.add_argument("--ids-file", help="Chỉ cào các trip_hotel_id trong file này (mỗi dòng một id), luôn cào lại bỏ qua cache")
+    parser.add_argument("--require-detail-block", action="store_true", help="Coi raw chưa có khối hotelDetailResponse (raw cũ) là chưa cào — dùng cho schema v2")
     parser.add_argument("--locale", default=config.LOCALE)
     parser.add_argument("--currency", default=config.CURRENCY)
     parser.add_argument("--checkin", help="YYYY-MM-DD")

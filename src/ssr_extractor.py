@@ -18,9 +18,13 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+from api_extract import _next_f_text
 from detail_extract import extract_detail
 from hotel_description import description_from_scripts
 from hotel_facilities import normalize_facility_payload, payload_from_scripts
+
+DETAIL_BLOCK_URL = "embedded:hotel-detail-response"
+_JSON = json.JSONDecoder()
 
 PUSH_RE = re.compile(r"(?:self|window)\.__next_f\.push\(\s*")
 JSON_LD_RE = re.compile(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.I | re.S)
@@ -96,6 +100,55 @@ def extract_next_flight_chunks(scripts: list[str]) -> list[Any]:
                 chunks.append(arg)
 
     return chunks
+
+
+def extract_hotel_detail_response(
+    html_text: str, flight_chunks: list[Any] | None = None
+) -> dict | None:
+    """Extract embedded hotelDetailResponse payload from Next.js SSR stream.
+
+    Ensures 100% parity with crawl_detail._capture_detail_response for Schema V2 compatibility.
+    """
+    # 1. Primary: regex-decoded next_f text stream (fast & identical to crawl_detail)
+    try:
+        text = _next_f_text(html_text)
+        if text:
+            anchor = '"hotelDetailResponse":'
+            index = text.find(anchor)
+            if index >= 0:
+                value, _ = _JSON.raw_decode(text, index + len(anchor))
+                if isinstance(value, dict) and value.get("hotelBaseInfo"):
+                    return value
+    except Exception:
+        pass
+
+    # 2. Fallback: search across parsed flight chunks if available
+    if flight_chunks:
+        def _find_detail(obj: Any) -> dict | None:
+            if isinstance(obj, dict):
+                if "hotelDetailResponse" in obj and isinstance(obj["hotelDetailResponse"], dict):
+                    res = obj["hotelDetailResponse"]
+                    if res.get("hotelBaseInfo"):
+                        return res
+                if "hotelBaseInfo" in obj and ("hotelPolicyInfo" in obj or "starInfo" in obj):
+                    return obj
+                for v in obj.values():
+                    found = _find_detail(v)
+                    if found:
+                        return found
+            elif isinstance(obj, list):
+                for item in obj:
+                    found = _find_detail(item)
+                    if found:
+                        return found
+            return None
+
+        for chunk in flight_chunks:
+            found = _find_detail(chunk)
+            if found:
+                return found
+
+    return None
 
 
 def parse_hotel_html(
@@ -188,7 +241,8 @@ def parse_hotel_html(
                 found.extend(extract_nested_room_payloads(item))
         return found
 
-    for chunk in extract_next_flight_chunks(scripts):
+    flight_chunks = extract_next_flight_chunks(scripts)
+    for chunk in flight_chunks:
         packets.append({
             "url": "embedded:next-f-chunk",
             "method": "EMBEDDED",
@@ -203,12 +257,23 @@ def parse_hotel_html(
                 "response": room_obj,
             })
 
+    # 5b. Schema V2 hotelDetailResponse block
+    detail_block = extract_hotel_detail_response(html_text, flight_chunks)
+    if detail_block:
+        packets.append({
+            "url": DETAIL_BLOCK_URL,
+            "method": "EMBEDDED",
+            "status": 200,
+            "response": detail_block,
+        })
+
     # 6. Any additional packets (e.g. dynamic room list API call if enabled)
     if additional_packets:
         packets.extend(additional_packets)
 
     # 7. Extract normalized record via canonical parser
     normalized = extract_detail(packets, hotel_id_str, url, currency, locale)
+    normalized["has_detail_block"] = bool(detail_block)
 
     # Attach packets metadata for raw_store compatibility
     return {
