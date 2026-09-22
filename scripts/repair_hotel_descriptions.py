@@ -70,7 +70,7 @@ async def main(args):
           f'{len(jobs)} pending; workers={args.workers}')
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, channel=args.browser_channel)
+        browser = await playwright.chromium.launch(headless=False, channel=args.browser_channel)
         context = await browser.new_context(locale=args.locale, viewport=config.VIEWPORT)
         async def route_assets(route):
             if route.request.resource_type in {'image', 'media', 'font'}:
@@ -136,7 +136,7 @@ if __name__ == '__main__':
     parser.add_argument('--hotel-id')
     parser.add_argument('--limit', type=int)
     parser.add_argument('--workers', type=int, choices=(1, 2, 3, 4), default=2)
-    parser.add_argument('--browser-channel', choices=('chrome', 'msedge'), default='chrome')
+    parser.add_argument('--browser-channel', choices=('chrome', 'msedge'), default=None)
     parser.add_argument('--apply', action='store_true', help='update only hotel_translations.description')
     parser.add_argument('--force', action='store_true', help='ignore successful checkpoints')
     asyncio.run(main(parser.parse_args()))

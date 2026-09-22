@@ -150,22 +150,41 @@ Upsert theo `trip_hotel_id`, chạy lại bao nhiêu lần cũng không nhân đ
 
 ### 4. Crawl trang chi tiết (ảnh, tiện ích, loại phòng)
 
-Không chạy đồng thời với `crawl_api.py` vì cả hai dùng chung `browser_profile`.
-Luôn kiểm tra một khách sạn trước:
+Hệ thống hỗ trợ 2 cơ chế thu thập chi tiết khách sạn:
+
+#### A. Fast HTTP Crawler (No-Browser — Khuyến nghị)
+Sử dụng `curl_cffi` giả lập vân tay TLS Chrome 124, bóc tách luồng Next.js SSR mà **không cần mở trình duyệt Chromium**:
+- **Tốc độ:** ~0.6s/khách sạn (nhanh gấp 5–10 lần trình duyệt).
+- **Bộ nhớ:** ~70 MB RAM phẳng (so với 2–3 GB của Playwright).
+- **Đầy đủ dữ liệu:** Bóc tách 100% ảnh, tiện ích, mô tả và cấu trúc phòng vật lý (`physicRoomMap`).
+- **Tài liệu kiến trúc chi tiết:** Xem [`docs/no_browser_architecture.md`](docs/no_browser_architecture.md).
+
+```bash
+# Cào thử 1 khách sạn theo ID
+python src/crawl_fast.py --hotel-id 104981087
+
+# Cào 30 khách sạn trên Direct IP (an toàn, 2 workers, delay 1.5s-3.5s)
+python src/crawl_fast.py --limit 30
+
+# Cào các khách sạn còn thiếu trong DB và tự động nạp vào PostgreSQL
+python src/crawl_fast.py --from-db --missing-only --limit 50 --apply-db
+
+# Chạy với Residential Proxy (nếu có, không giới hạn delay, 15-30 workers)
+python src/crawl_fast.py --limit 100 --concurrency 15 --proxy proxies.txt
+```
+
+#### B. Playwright Crawler (Browser Automation — Dự phòng)
+Sử dụng trình duyệt Chromium thật qua Playwright (`src/crawl_detail.py`). Giữ lại làm phương án dự phòng khi Trip.com thay đổi cấu trúc SSR:
 
 ```bash
 python src/crawl_detail.py --file api_hotels_301_xxx.json --limit 1
-```
-
-Xem `output/data/hotel_details_*.json` và raw response trong
-`output/details/raw/`. Nếu ảnh, tiện ích và phòng hợp lý thì chạy toàn bộ
-(khoảng **10-13 giây/khách sạn** — vài nghìn khách sạn sẽ mất nhiều giờ,
-nên chạy nền/qua đêm; tự checkpoint mỗi 20 khách sạn và tự bỏ qua khách
-sạn đã crawl thành công nếu chạy lại):
-
-```bash
 python src/crawl_detail.py --file api_hotels_301_xxx.json
 python src/crawl_detail.py --from-db              # lấy danh sách hotel từ chính DB
+```
+
+#### C. Nạp dữ liệu vào PostgreSQL
+
+```bash
 python src/db/detail_loader.py hotel_details_xxx.json
 python src/db/detail_loader.py hotel_details_xxx.json --replace-existing  # thay detail parser cũ
 python src/db/detail_loader.py hotel_details_xxx.json --no-prices  # bỏ qua giá nếu cần
@@ -204,16 +223,18 @@ Sau đó mở <http://127.0.0.1:8000>; Database Inspector nằm tại
 ## Cấu trúc
 
 ```
-src/config.py           cấu hình tập trung, đọc từ .env
-src/setup_profile.py    tạo Chromium profile dùng lại (chạy 1 lần)
-src/crawl_api.py        pipeline chính: SSR trang 1 + bắt/phát lại API phân
-                         trang + tự chia theo giá khi vượt ngưỡng chặn mềm
-src/api_extract.py      parse response API + HTML SSR → dict khớp cột DB
-src/crawl_detail.py     crawl trang chi tiết (ảnh, tiện ích, loại phòng)
-src/detail_extract.py   parse response trang chi tiết
-src/db/loader.py        upsert danh sách khách sạn vào PostgreSQL
-src/db/detail_loader.py upsert detail + location + loại phòng + giá theo ngày
-migrations/001_init.sql schema: hotels, locations, hotel_images,
+src/crawl_fast.py        crawler chi tiết No-Browser siêu tốc (HTTP + curl_cffi Chrome 124)
+src/ssr_extractor.py     bóc tách luồng Next.js React Server Components (physicRoomMap)
+src/engine/              hệ thống mạng v2: giả lập TLS, kiểm tra XOR chống bot, xoay proxy
+src/config.py            cấu hình tập trung, đọc từ .env
+src/setup_profile.py     tạo Chromium profile dùng lại (chạy 1 lần)
+src/crawl_api.py         pipeline danh sách: SSR trang 1 + bắt/phát lại API phân trang
+src/api_extract.py       parse response API + HTML SSR → dict khớp cột DB
+src/crawl_detail.py      crawler chi tiết trình duyệt (Playwright, phương án dự phòng)
+src/detail_extract.py    parse response trang chi tiết (tổng hợp dữ liệu chuẩn)
+src/db/loader.py         upsert danh sách khách sạn vào PostgreSQL
+src/db/detail_loader.py  upsert detail + location + loại phòng + giá theo ngày
+migrations/001_init.sql  schema: hotels, locations, hotel_images,
                          hotel_amenities, room_types, hotel_prices,
                          crawl_runs, crawl_errors
 

@@ -1,0 +1,12 @@
+# Residential Proxy Configuration
+# Khi có proxy residential, bạn có thể dán vào đây theo một trong các định dạng:
+#
+# 1. Danh sách proxy (mỗi dòng một proxy):
+#    host:port:username:password
+#    http://username:password@host:port
+#
+# 2. Hoặc cấu hình một Gateway xoay IP tự động (Rotating Residential):
+#    http://username-session-{session_id}:password@residential.provider.com:7000
+#
+# Hiện tại để trống để crawler chạy ở chế độ DIRECT IP an toàn (Subcritical Safe).
+
