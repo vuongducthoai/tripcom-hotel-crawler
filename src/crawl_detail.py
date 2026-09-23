@@ -22,6 +22,7 @@ from typing import Any
 
 from playwright.async_api import Error as BrowserError, async_playwright
 
+import block_detect
 import config
 import raw_store
 from db.i18n import language_key
@@ -51,46 +52,10 @@ ROOM_LIST_TIMEOUT_MS = 9000
 ANTIBOT_XOR_KEY = 0x0A
 
 
-def _decode_obfuscated(value: list) -> str | None:
-    """Giải mảng byte XOR của Trip.com; None nếu không phải thông báo chặn.
-
-    Dạng này trông như [113, 40, 108, ...] nên bộ dò cũ duyệt qua chỉ thấy
-    toàn số nguyên và không nhận ra mình đang bị từ chối.
-    """
-    if not (50 <= len(value) <= 20_000):
-        return None
-    if not all(isinstance(byte, int) and 0 <= byte <= 255 for byte in value):
-        return None
-    text = "".join(chr(byte ^ ANTIBOT_XOR_KEY) for byte in value)
-    return text if ("failedcause" in text or "Antibot" in text) else None
-
-
-def _blocked_reason(value: Any) -> str | None:
-    """Lý do Trip.com từ chối, None nếu response bình thường.
-
-    Bắt cả hai dạng đã gặp thật:
-      - dict có htlSpiderActionErrorCode  (vd 4030)
-      - mảng byte XOR có failedcause      (vd Antibot-Gray-ip)
-    """
-    if isinstance(value, dict):
-        if value.get("htlSpiderActionErrorCode") is not None:
-            return f"htlSpiderActionErrorCode={value['htlSpiderActionErrorCode']}"
-        for child in value.values():
-            found = _blocked_reason(child)
-            if found:
-                return found
-    elif isinstance(value, list):
-        decoded = _decode_obfuscated(value)
-        if decoded:
-            try:
-                return str(json.loads(decoded).get("failedcause") or "Antibot")
-            except Exception:
-                return "Antibot"
-        for child in value:
-            found = _blocked_reason(child)
-            if found:
-                return found
-    return None
+# Nhận diện chặn nằm ở block_detect.py để crawl_fast.py (không trình duyệt)
+# dùng chung mà khỏi import file này.
+_decode_obfuscated = block_detect.decode_obfuscated
+_blocked_reason = block_detect.blocked_reason
 
 
 def _has_detail(value: dict) -> bool:
@@ -292,12 +257,32 @@ async def _capture_response(resp, packets: list[dict]) -> None:
         value = json.loads(body)
     except Exception:
         return
-    packets.append({
+    packet = {
         "url": req.url.split("?", 1)[0],
         "method": req.method,
         "status": resp.status,
         "response": value,
-    })
+    }
+    # Lưu thêm request của các API cần thiết để crawler tĩnh (crawl_fast.py)
+    # gọi lại được bằng HTTP thuần, khỏi phải mở Chromium.
+    if any(marker in req.url for marker in TEMPLATE_APIS):
+        try:
+            packet["request"] = {
+                "url": req.url,
+                "post_data": req.post_data,
+                "headers": {k: v for k, v in (req.headers or {}).items()
+                            if k.lower() in TEMPLATE_HEADERS},
+            }
+        except Exception:
+            pass
+    packets.append(packet)
+
+
+# API mà crawler tĩnh cần gọi lại → lưu kèm request để dựng mẫu
+TEMPLATE_APIS = ("getHotelRoomListOversea", "ctGetNearbyPlaceInfo", "getHotelCommentInfo",
+                 "ctgethotelalbum", "getHotelRoomPopInfoPCOnline", "getDetailAdditionalInfo")
+TEMPLATE_HEADERS = {"content-type", "accept", "accept-language", "referer", "origin",
+                    "x-traceid", "cookieorigin", "currency", "locale"}
 
 
 async def _wait_for_capture_quiet(

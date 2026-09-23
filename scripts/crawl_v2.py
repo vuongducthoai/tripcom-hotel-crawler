@@ -132,14 +132,24 @@ def run(argv: list[str], label: str, ok_codes=(0,)) -> tuple[int, list[str]]:
 
 
 def crawl(ids_file: Path, locale: str, currency: str, checkin: str | None, checkout: str | None,
-          workers: int, list_file: Path | None) -> str | None:
+          workers: int, list_file: Path | None, fast: bool = False) -> str | None:
     source = ["--file", str(list_file)] if list_file else ["--from-db"]
     # checkin=None: không ép ngày — crawl_detail tự dùng lại ngày ở của bản thứ
     # tiếng kia cho TỪNG hotel (nếu ngày đó còn ở tương lai), để ghép gói giá.
     dates = ["--checkin", checkin, "--checkout", checkout] if checkin else []
-    _, log = run(["src/crawl_detail.py", *source, "--locale", locale, "--currency", currency,
-                  "--ids-file", str(ids_file.relative_to(ROOT)), "--workers", str(workers),
-                  *dates], f"crawl_detail {locale}")
+
+    if fast:
+        # Crawler tĩnh: tải HTML rồi gọi lại API, không mở Chromium. Ghi thẳng
+        # vào thư mục raw chính (vẫn không đè raw cũ nhiều dữ liệu hơn) để
+        # v2_loader đọc được như thường.
+        argv = ["src/crawl_fast.py", "--ids-file", str(ids_file.relative_to(ROOT)),
+                "--locale", locale, "--currency", currency, "--into-raw",
+                "--concurrency", str(min(workers, 4)), *dates]
+        _, log = run(argv, f"crawl_fast {locale}", ok_codes=(0, 1, 2))
+    else:
+        _, log = run(["src/crawl_detail.py", *source, "--locale", locale, "--currency", currency,
+                      "--ids-file", str(ids_file.relative_to(ROOT)), "--workers", str(workers),
+                      *dates], f"crawl_detail {locale}")
     return next((why for marker, why in STOP_SIGNALS if any(marker in line for line in log)), None)
 
 
@@ -199,7 +209,8 @@ def main(args) -> None:
             ids_file.write_text("".join(f"{h}\n" for h in lot), encoding="utf-8")
             stop = None
             for locale, currency in markets:
-                stop = crawl(ids_file, locale, currency, crawl_in, crawl_out, args.workers, list_file)
+                stop = crawl(ids_file, locale, currency, crawl_in, crawl_out, args.workers,
+                         list_file, fast=args.fast)
                 if stop:
                     break
             # Kể cả khi phải dừng, vẫn kiểm tra + nạp phần đã cào được.
@@ -234,5 +245,8 @@ if __name__ == "__main__":
                     help="chỉ cào một thứ tiếng; --only en tự dùng ngày ở của bản tiếng Việt")
     ap.add_argument("--validate-only", action="store_true", help="cào + kiểm tra, KHÔNG nạp v2")
     ap.add_argument("--redo", action="store_true", help="cào lại cả hotel đã xong v2")
+    ap.add_argument("--fast", action="store_true",
+                    help="dùng crawl_fast.py (HTTP tĩnh, KHÔNG mở trình duyệt) thay cho "
+                         "crawl_detail.py; cần có output/api_templates_<locale>_<tiền tệ>.json")
     ap.add_argument("--plan", action="store_true", help="chỉ in kế hoạch")
     main(ap.parse_args())
