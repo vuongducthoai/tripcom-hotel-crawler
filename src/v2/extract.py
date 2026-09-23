@@ -320,6 +320,9 @@ def check_response(dump: dict, raw_locale: str, currency: str, file_hotel_id: st
     if normalized.get("page_dead"):
         issues.add("page_dead", "hotel", value=normalized.get("page_dead"))
         return None
+    if normalized.get("success") is False:
+        issues.add("crawl_failed", "hotel", value=str(normalized.get("error") or "unknown")[:300])
+        return None
 
     # Ngôn ngữ: thông số trong raw + chữ giao diện có đúng thứ tiếng không
     lang = short_locale(raw_locale)

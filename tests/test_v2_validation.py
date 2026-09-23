@@ -111,6 +111,15 @@ class Layer1Response(unittest.TestCase):
         self.assertIsNone(bundle)
         self.assertIn("blocked", rules_of(issues))
 
+    def test_failed_navigation_rejects_stub_hotel(self):
+        dump = make_dump("vi-VN", "VND")
+        dump["normalized"]["success"] = False
+        dump["normalized"]["error"] = "Page.goto: net::ERR_INVALID_AUTH_CREDENTIALS"
+        dump["responses"] = []
+        bundle, issues = run(dump, locale="vi-VN", currency="VND")
+        self.assertIsNone(bundle)
+        self.assertIn("crawl_failed", rules_of(issues))
+
     def test_xor_antibot_array_is_blocked(self):
         message = '{"failedcause":"Antibot-Gray-ip"}' + " " * 40
         self.assertEqual(blocked_reason([ord(ch) ^ 0x0A for ch in message]), "Antibot")

@@ -6,6 +6,8 @@
     python scripts/crawl_v2.py --city-id 1356                   # một thành phố (Đà Nẵng)
     python scripts/crawl_v2.py                                  # toàn bộ hotel trong DB
     python scripts/crawl_v2.py --list-file api_hotels_<cityId>_….json   # thành phố nước ngoài
+    python scripts/crawl_v2.py --only vi                        # chỉ tiếng Việt (tiếng Anh cào sau)
+    python scripts/crawl_v2.py --only en                        # bù tiếng Anh, tự dùng ngày của bản Việt
 
 Mỗi lô (mặc định 50 hotel):
     1. Cào bản Việt  (src/crawl_detail.py --ids-file … --checkin NGÀY)
@@ -107,9 +109,13 @@ def done_v2(hotel: str) -> bool:
     return vi_ok and en_ok and vi_in == en_in
 
 
+def done_market(hotel: str, market: tuple[str, str]) -> bool:
+    return raw_state(hotel, *market)[0]
+
+
 # ---------------------------------------------------------------- gọi script có sẵn
 def run(argv: list[str], label: str, ok_codes=(0,)) -> tuple[int, list[str]]:
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1", PYTHONUNBUFFERED="1")  # in log ngay, không đợi đầy bộ đệm
     print(f"\n    $ python {' '.join(argv)}", flush=True)
     process = subprocess.Popen([sys.executable, *argv], cwd=str(ROOT), env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -125,12 +131,15 @@ def run(argv: list[str], label: str, ok_codes=(0,)) -> tuple[int, list[str]]:
     return process.returncode, lines
 
 
-def crawl(ids_file: Path, locale: str, currency: str, checkin: str, checkout: str, workers: int,
-          list_file: Path | None) -> str | None:
+def crawl(ids_file: Path, locale: str, currency: str, checkin: str | None, checkout: str | None,
+          workers: int, list_file: Path | None) -> str | None:
     source = ["--file", str(list_file)] if list_file else ["--from-db"]
+    # checkin=None: không ép ngày — crawl_detail tự dùng lại ngày ở của bản thứ
+    # tiếng kia cho TỪNG hotel (nếu ngày đó còn ở tương lai), để ghép gói giá.
+    dates = ["--checkin", checkin, "--checkout", checkout] if checkin else []
     _, log = run(["src/crawl_detail.py", *source, "--locale", locale, "--currency", currency,
                   "--ids-file", str(ids_file.relative_to(ROOT)), "--workers", str(workers),
-                  "--checkin", checkin, "--checkout", checkout], f"crawl_detail {locale}")
+                  *dates], f"crawl_detail {locale}")
     return next((why for marker, why in STOP_SIGNALS if any(marker in line for line in log)), None)
 
 
@@ -156,13 +165,23 @@ def main(args) -> None:
         scope = [str(h) for h in args.ids]
     else:
         scope = hotels_in_scope(args.city_id)
-    todo = [h for h in scope if args.redo or not done_v2(h)]
+    markets = [m for m in MARKETS if not args.only or m[0].startswith(args.only)]
+    if args.only:
+        todo = [h for h in scope if args.redo or not done_market(h, markets[0])]
+    else:
+        todo = [h for h in scope if args.redo or not done_v2(h)]
+    # --only en mà không chỉ ngày: mỗi hotel tự dùng ngày của bản tiếng Việt.
+    crawl_in, crawl_out = (None, None) if (args.only == "en" and not args.checkin) else (checkin, checkout)
     lots = [todo[i:i + args.lot_size] for i in range(0, len(todo), args.lot_size)]
     if args.max_lots:
         lots = lots[:args.max_lots]
 
-    print(f"Phạm vi {len(scope)} hotel · đã xong v2 {len(scope) - len(todo)} · cần cào {len(todo)}")
-    print(f"Ngày ở dùng chung cho cả hai thứ tiếng: {checkin} → {checkout}")
+    label = {"vi": "tiếng Việt", "en": "tiếng Anh"}.get(args.only, "cả hai thứ tiếng")
+    print(f"Phạm vi {len(scope)} hotel · đã xong ({label}) {len(scope) - len(todo)} · cần cào {len(todo)}")
+    if crawl_in:
+        print(f"Ngày ở: {crawl_in} → {crawl_out}")
+    else:
+        print("Ngày ở: lấy theo bản tiếng Việt của từng hotel (nếu ngày đó đã qua thì dùng ngày mặc định)")
     print(f"Chạy {len(lots)} lô × tối đa {args.lot_size} hotel "
           f"({'chỉ kiểm tra, không nạp' if args.validate_only else 'kiểm tra rồi nạp v2'})")
     if args.plan or not lots:
@@ -179,12 +198,12 @@ def main(args) -> None:
             ids_file = batch_dir / f"{stamp}_lot{number:03d}.txt"
             ids_file.write_text("".join(f"{h}\n" for h in lot), encoding="utf-8")
             stop = None
-            for locale, currency in MARKETS:
-                stop = crawl(ids_file, locale, currency, checkin, checkout, args.workers, list_file)
+            for locale, currency in markets:
+                stop = crawl(ids_file, locale, currency, crawl_in, crawl_out, args.workers, list_file)
                 if stop:
                     break
             # Kể cả khi phải dừng, vẫn kiểm tra + nạp phần đã cào được.
-            gate_ok = all([load(ids_file, locale, args.validate_only) for locale, _ in MARKETS])
+            gate_ok = all([load(ids_file, locale, args.validate_only) for locale, _ in markets])
             if stop:
                 raise StopAll(stop)
             if not gate_ok:
@@ -211,6 +230,8 @@ if __name__ == "__main__":
     ap.add_argument("--pause", type=int, default=60, help="nghỉ giữa các lô, giây (mặc định 60)")
     ap.add_argument("--checkin", help="YYYY-MM-DD; mặc định thứ Hai tuần sau nữa")
     ap.add_argument("--checkout", help="YYYY-MM-DD; mặc định checkin + 1 ngày")
+    ap.add_argument("--only", choices=("vi", "en"),
+                    help="chỉ cào một thứ tiếng; --only en tự dùng ngày ở của bản tiếng Việt")
     ap.add_argument("--validate-only", action="store_true", help="cào + kiểm tra, KHÔNG nạp v2")
     ap.add_argument("--redo", action="store_true", help="cào lại cả hotel đã xong v2")
     ap.add_argument("--plan", action="store_true", help="chỉ in kế hoạch")

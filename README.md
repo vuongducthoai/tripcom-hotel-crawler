@@ -47,6 +47,7 @@ python scripts\crawl_v2.py --plan                        # xem kế hoạch
 python scripts\crawl_v2.py --ids 134013415               # thử 1 hotel
 python scripts\crawl_v2.py --lot-size 20 --max-lots 1    # thử 1 lô
 python scripts\crawl_v2.py                               # toàn bộ hotel trong DB
+python scripts\crawl_v2.py --list-file output\data\api_hotels_495_viVN_VND_20260922_212840.json --only vi --workers 2
 ```
 
 **Thành phố nước ngoài** (lấy `city`, `countryId` từ URL trang danh sách trên trip.com):
@@ -74,6 +75,9 @@ python src\web_app.py            # http://127.0.0.1:8000
 ## Lưu ý
 
 - Không chạy hai crawler cùng lúc (dùng chung browser profile).
+- Proxy cho Chromium được cấu hình qua `TRIP_PROXY_ENABLED`, `TRIP_PROXY_SERVER`,
+  `TRIP_PROXY_USERNAME`, `TRIP_PROXY_PASSWORD` trong `.env`. Thử một khách sạn
+  trước khi chạy lô; proxy có thể mở trang chủ nhưng thất bại ở trang chi tiết.
 - Bị chặn (4030 / trang đăng nhập) thì crawler tự dừng; nghỉ vài tiếng rồi chạy lại đúng lệnh cũ.
 - `robots.txt` của Trip.com cấm các đường dẫn đang cào (`/hotels/list`, `/hotels/detail`,
   `/restapi/soa2`). Dữ liệu chỉ dùng nội bộ; mở rộng quy mô cần anh Vũ xác nhận.

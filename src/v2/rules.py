@@ -27,6 +27,7 @@ RULES: dict[str, tuple[int, str, str]] = {
     "raw_unreadable":        (1, ERROR,   "Không đọc được file raw"),
     "blocked":               (1, ERROR,   "Trip.com chặn (mã 4030 / trang đăng nhập / Antibot) — không phải dữ liệu thật"),
     "page_dead":             (1, ERROR,   "Trang khách sạn không còn tồn tại"),
+    "crawl_failed":          (1, ERROR,   "Lượt cào thất bại; không nạp dữ liệu thiếu vào v2"),
     "wrong_locale":          (1, ERROR,   "Raw không đúng ngôn ngữ yêu cầu"),
     "wrong_currency":        (1, ERROR,   "Giá trong raw không đúng tiền tệ yêu cầu"),
     "missing_hotel_id":      (1, ERROR,   "Không xác định được mã khách sạn"),

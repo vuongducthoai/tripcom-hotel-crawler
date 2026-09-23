@@ -855,6 +855,9 @@ async def main(args: argparse.Namespace) -> None:
             "viewport": config.VIEWPORT,
             "args": ["--disable-blink-features=AutomationControlled"],
         }
+        proxy = config.browser_proxy()
+        if proxy:
+            launch_options["proxy"] = proxy
         if args.browser_channel:
             launch_options["channel"] = args.browser_channel
         try:

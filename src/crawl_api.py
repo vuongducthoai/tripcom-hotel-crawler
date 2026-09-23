@@ -254,6 +254,8 @@ async def probe_count(page, tpl: dict, base_filters: list[dict], extra: list[dic
     if count is None:
         print(f"    ! Probe {_fmt_extra(extra)} không có hotelTotalCount; "
               f"top-level keys={list(payload)[:10]}")
+        status = payload.get("ResponseStatus") or {}
+        print(f"      ResponseStatus: Ack={status.get('Ack')} Errors={str(status.get('Errors'))[:300]}")
     return count
 
 
@@ -700,14 +702,40 @@ async def crawl_one_city(
                         city, dedupe(collector.rows), out, False, expected_total,
                         locale, currency,
                     )
+                    if phase_name == "truy vấn gốc" and gain == 0 and len(seen) < goal:
+                        raise SystemExit(
+                            "API fetchHotelList không trả khách sạn mới dù tổng thành phố "
+                            f"báo {expected_total}. Đã giữ checkpoint tại {out}. "
+                            "Dừng để kiểm tra phiên đăng nhập/profile hoặc giới hạn từ Trip.com; "
+                            "không tiếp tục thử các mảnh rỗng."
+                        )
                     if len(seen) >= goal:
                         print(f"  ✓ Đạt mục tiêu {goal} ID, dừng các lớp còn lại.")
                         break
         else:
-            await paginate(
+            seen = await paginate(
                 page, collector, city, out, baseline, max_pages,
                 locale=locale, currency=currency,
             )
+            if (expected_total and max_pages > 1 and not target_count
+                    and len(seen) < expected_total * config.MIN_COMPLETE_RATIO):
+                price_options = extract_filter_options(html, "15")
+                leaves = await build_partition(
+                    page, tpl, base_filters, price_options, [], baseline or expected_total,
+                )
+                if leaves:
+                    print(f"  • API hết sớm; thử vét {len(leaves)} khoảng giá…")
+                for extra, count in leaves:
+                    before = len(seen)
+                    seen = await paginate(
+                        page, collector, city, out, count, max_pages,
+                        extra_filters=extra, seen=seen, locale=locale, currency=currency,
+                    )
+                    print(f"    ↳ {_fmt_extra(extra)}: +{len(seen) - before}; "
+                          f"tổng {len(seen)}/{expected_total}")
+                    _save(city, dedupe(collector.rows), out, False, expected_total, locale, currency)
+                    if len(seen) >= expected_total * config.MIN_COMPLETE_RATIO:
+                        break
     else:
         print("  ⚠ Không bắt được mẫu request fetchHotelList sau 8 vòng cuộn.")
         print(f"    Xem {collector.dump_dir} và ảnh chụp bên dưới rồi gửi lại cho em.")
@@ -754,7 +782,7 @@ async def main(args: argparse.Namespace) -> None:
         profile_path = config.ROOT / profile_path
 
     async with async_playwright() as p:
-        ctx = await p.chromium.launch_persistent_context(
+        launch_options = dict(
             user_data_dir=str(profile_path),
             headless=config.HEADLESS,
             locale=locale,
@@ -762,6 +790,10 @@ async def main(args: argparse.Namespace) -> None:
             viewport=config.VIEWPORT,
             args=["--disable-blink-features=AutomationControlled"],
         )
+        proxy = config.browser_proxy()
+        if proxy:
+            launch_options["proxy"] = proxy
+        ctx = await p.chromium.launch_persistent_context(**launch_options)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         market_tag = f"{locale}_{currency}".replace("-", "")
