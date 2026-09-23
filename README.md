@@ -2,9 +2,6 @@
 
 Crawl dữ liệu khách sạn Trip.com (tiếng Việt + tiếng Anh) về PostgreSQL.
 
-- **Người thực hiện:** Vương Đức Thoại, Trần Đăng Nguyên (S.AI20K)
-- **Nghiệm thu:** Nguyễn Thạch Vũ (VSF-KD&VH DLKS-PMKD)
-
 ## Hiện trạng
 
 - **Dữ liệu cũ (schema `public`):** 3.431 khách sạn TP.HCM, giữ nguyên để tham khảo.
