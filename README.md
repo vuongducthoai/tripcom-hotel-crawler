@@ -2,10 +2,6 @@
 
 Crawler thu thập danh sách và dữ liệu chi tiết khách sạn từ Trip.com, kiểm tra chất lượng rồi lưu vào PostgreSQL. Dữ liệu được tổ chức trong schema `v2`, hỗ trợ nhiều quốc gia, nhiều ngôn ngữ, loại phòng, gói giá, chính sách, ảnh, tiện nghi, đánh giá và địa điểm lân cận.
 
-- **Người thực hiện:** Vương Đức Thoại, Trần Đăng Nguyên (S.AI20K)
-- **Nghiệm thu:** Nguyễn Thạch Vũ (VSF-KD&VH DLKS-PMKD)
-- **Trạng thái hiện tại:** ưu tiên `vi-VN/VND`; có thể bổ sung `en-US/USD` sau.
-
 ## Luồng dữ liệu
 
 ```text
