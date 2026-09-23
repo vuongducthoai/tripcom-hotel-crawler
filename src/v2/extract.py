@@ -67,6 +67,7 @@ class Bundle:
     raw_path: str | None
     has_detail: bool = False
     detail_text: dict = field(default_factory=dict)     # chữ lấy từ hotelDetailResponse
+    desc_labels: list = field(default_factory=list)     # hotelDescriptionInfo.lables
     rooms_sold_out: bool = False
     country: M.Country | None = None
     city: M.City | None = None
@@ -259,6 +260,26 @@ def first_int(text: Any) -> int | None:
     return int(found.group()) if found else None
 
 
+ROOM_COUNT_LABEL = re.compile(r"(s\u1ed1\s*ph\u00f2ng|number\s+of\s+rooms|rooms?)\s*[:\uff1a]\s*(\d+)", re.I)
+
+
+def room_count_from_labels(labels: Any) -> int | None:
+    """hotelDescriptionInfo.lables → số phòng.
+
+    Trip.com trả ["Khai Tr\u01b0\u01a1ng: 2006", "T\u00e2n Trang: 2025", "S\u1ed1 Ph\u00f2ng: 198"];
+    bản tiếng Anh là "Number of Rooms: 7". Năm khai trương/tân trang đã có ở
+    hotelBaseInfo nên ở đây chỉ lấy số phòng.
+    """
+    if not isinstance(labels, (list, tuple)):
+        return None
+    for item in labels:
+        found = ROOM_COUNT_LABEL.search(str(item or ""))
+        if found:
+            value = int(found.group(2))
+            return value if 1 <= value <= 10000 else None
+    return None
+
+
 def parse_ms_date(value: Any) -> datetime | None:
     """'/Date(1789923600000+0800)/' → datetime UTC."""
     found = re.search(r"/Date\((-?\d+)", str(value or ""))
@@ -401,6 +422,8 @@ def extract_detail(b: Bundle, detail: dict, c: Cleaner, issues: Issues) -> None:
 
     lat, lng = c.coords(position.get("lat"), position.get("lng"), "hotel", b.trip_hotel_id)
     open_year, reno_year = first_int(base.get("openYear")), first_int(base.get("fitmentYear"))
+    room_count = room_count_from_labels(
+        (detail.get("hotelDescriptionInfo") or {}).get("lables") or b.desc_labels)
     if open_year and reno_year and reno_year < open_year:
         issues.add("renovated_before_open", "hotel", field="renovated_year",
                    value=f"{open_year}/{reno_year}")
@@ -414,6 +437,7 @@ def extract_detail(b: Bundle, detail: dict, c: Cleaner, issues: Issues) -> None:
         "medal_type": medal.get("type"), "open_year": open_year, "renovated_year": reno_year,
         "latitude": lat, "longitude": lng,
         "is_private_host": bool(policy.get("privateHostInfo")),
+        "room_count": room_count,
     }, issues, "hotel", b.trip_hotel_id)
     if hotel:
         b.hotel = hotel
@@ -1077,6 +1101,10 @@ def build_bundle(dump: dict, *, raw_locale: str, currency: str, raw_path: str | 
     if detail and master and master != hotel_id:
         issues.add("detail_mismatch", "hotel", value=f"hotelDetailResponse của {master}")
         detail = None
+    described = api(dump, "embedded:hotel-description")
+    labels = ((described or {}).get("hotelDescriptionInfo") or {}).get("lables")
+    if isinstance(labels, list):
+        b.desc_labels = labels
     if detail:
         b.has_detail = True
         extract_detail(b, detail, c, issues)

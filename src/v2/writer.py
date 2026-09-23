@@ -71,8 +71,9 @@ def _write_hotel(cur, b: Bundle, city_id: int | None) -> int:
     h = b.hotel
     cur.execute(
         """INSERT INTO hotels (trip_hotel_id, city_id, star_level, star_type, is_super_star, medal_type,
-                               open_year, renovated_year, latitude, longitude, is_private_host, detail_url)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               open_year, renovated_year, room_count, latitude, longitude, is_private_host,
+                               detail_url)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (trip_hotel_id) DO UPDATE SET
                city_id         = COALESCE(EXCLUDED.city_id, hotels.city_id),
                star_level      = COALESCE(EXCLUDED.star_level, hotels.star_level),
@@ -81,6 +82,7 @@ def _write_hotel(cur, b: Bundle, city_id: int | None) -> int:
                medal_type      = COALESCE(EXCLUDED.medal_type, hotels.medal_type),
                open_year       = COALESCE(EXCLUDED.open_year, hotels.open_year),
                renovated_year  = COALESCE(EXCLUDED.renovated_year, hotels.renovated_year),
+               room_count      = COALESCE(EXCLUDED.room_count, hotels.room_count),
                latitude        = COALESCE(EXCLUDED.latitude, hotels.latitude),
                longitude       = COALESCE(EXCLUDED.longitude, hotels.longitude),
                is_private_host = COALESCE(EXCLUDED.is_private_host, hotels.is_private_host),
@@ -88,7 +90,8 @@ def _write_hotel(cur, b: Bundle, city_id: int | None) -> int:
                updated_at      = now()
            RETURNING id""",
         (h.trip_hotel_id, city_id, h.star_level, h.star_type, h.is_super_star, h.medal_type, h.open_year,
-         h.renovated_year, h.latitude, h.longitude, h.is_private_host, h.detail_url))
+         h.renovated_year, h.room_count, h.latitude, h.longitude, h.is_private_host,
+         h.detail_url))
     hotel_id = cur.fetchone()[0]
     t = b.hotel_i18n
     cur.execute(
