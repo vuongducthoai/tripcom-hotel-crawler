@@ -372,7 +372,14 @@ def _write_nearby(cur, b: Bundle, hotel_id: int) -> None:
                       sort_order = EXCLUDED.sort_order""",
           [(hotel_id, ids[p.trip_poi_id], p.group_code, p.distance_km, p.travel_mode, p.sort_order)
            for p in b.nearby])
-    _rows(cur, """INSERT INTO hotel_nearby_place_i18n VALUES %s
+    # group_code lưu THEO NGÔN NGỮ: Trip.com xếp nhóm khác nhau tuỳ locale
+    # (nhóm 4 "Dining" chỉ bản EN có), xem migrations_v2/006.
+    _rows(cur, """INSERT INTO hotel_nearby_place_i18n
+                      (hotel_id, place_id, locale, group_name, distance_text, group_code)
+                  VALUES %s
                   ON CONFLICT (hotel_id, place_id, locale) DO UPDATE SET
-                      group_name = EXCLUDED.group_name, distance_text = EXCLUDED.distance_text""",
-          [(hotel_id, ids[p.trip_poi_id], p.locale, p.group_name, p.distance_text) for p in b.nearby])
+                      group_name = EXCLUDED.group_name,
+                      distance_text = EXCLUDED.distance_text,
+                      group_code = EXCLUDED.group_code""",
+          [(hotel_id, ids[p.trip_poi_id], p.locale, p.group_name, p.distance_text, p.group_code)
+           for p in b.nearby])

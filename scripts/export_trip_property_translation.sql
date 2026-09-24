@@ -20,10 +20,15 @@
 --
 -- section_type giữ NGUYÊN giá trị Trip.com trả về:
 --   POLICY      → tên key trong hotelPolicyInfo ('checkInAndOut', 'pet'…)
---   SURROUNDING → tên nhóm chuẩn hoá từ group_code của Trip.com:
---                  2 → TRANSPORT, 3 → LANDMARK, 5 → SHOPPING, khác → OTHER
---                  (Trip.com chỉ trả số, không có tên mã, nên phải tự đặt;
---                   không dùng tên hiển thị vì tên đó bị dịch theo ngôn ngữ)
+--   SURROUNDING → '<mã nhóm>_<tên nhóm theo ngôn ngữ đó>', giữ nguyên tên
+--                  Trip.com trả về:  '2_Giao thông' (vi) / '2_Transport' (en).
+--                  LƯU Ý ĐÃ BIẾT VÀ CHẤP NHẬN: Trip.com xếp nhóm khác nhau theo
+--                  ngôn ngữ (cùng khách sạn 118050925, bản EN có thêm nhóm
+--                  4 Dining mà bản VI không có), nên CÙNG MỘT row_uuid có thể
+--                  mang hai section_type khác nhau ở hai ngôn ngữ. Hệ quả:
+--                    · đếm nhóm phải luôn lọc kèm lang
+--                    · lọc một nhóm chỉ ra một ngôn ngữ; muốn bản dịch kia
+--                      phải tra ngược theo row_uuid
 --   DESCRIPTION → 'hotelInfo' (Trip.com không có mã cho phần này)
 --
 -- Đổi LIMIT / bỏ chú thích dòng lọc thành phố ở CTE "sel" nếu cần.
@@ -60,11 +65,31 @@ ma_quoc_gia (trip_country_id, iso2) AS (VALUES
     (111, 'VN'), (27, 'DK'), (107, 'IN')
 ),
 
+-- Trip.com thỉnh thoảng không trả group_name cho vài địa điểm. Lấy tên phổ
+-- biến nhất của chính nhóm đó, trong chính ngôn ngữ đó, để section_type không
+-- bị rơi thành số trần ('3' lẫn với '3_Landmarks').
+ten_nhom AS (
+    SELECT DISTINCT ON (locale, group_code) locale, group_code, group_name
+    FROM (
+        SELECT npi.locale, COALESCE(npi.group_code, np.group_code) AS group_code,
+               npi.group_name, count(*) AS n
+        FROM v2.hotel_nearby_place_i18n npi
+        JOIN v2.hotel_nearby_places np
+          ON np.hotel_id = npi.hotel_id AND np.place_id = npi.place_id
+        WHERE COALESCE(npi.group_name, '') <> ''
+        GROUP BY 1, 2, 3
+    ) t
+    ORDER BY locale, group_code, n DESC, group_name
+),
+
 -- Địa điểm gần đây đã lọc rác: Trip.com thỉnh thoảng trả tên placeholder
 -- kiểu "size?" — bỏ cả địa điểm đó chứ không lưu nửa vời.
 dia_diem AS (
-    SELECT s.trip_hotel_id, pi.locale, pl.trip_poi_id, np.sort_order, np.group_code,
-           pi.name AS ten, np.distance_km, pl.latitude, pl.longitude, npi.group_name
+    SELECT s.trip_hotel_id, pi.locale, pl.trip_poi_id, np.sort_order,
+           -- mã nhóm theo đúng ngôn ngữ; cột cũ dùng chung chỉ là dự phòng
+           COALESCE(npi.group_code, np.group_code) AS group_code,
+           pi.name AS ten, np.distance_km, pl.latitude, pl.longitude,
+           COALESCE(NULLIF(btrim(npi.group_name), ''), tn.group_name) AS group_name
     FROM sel s
     JOIN v2.hotel_nearby_places np ON np.hotel_id = s.id
     JOIN v2.places      pl ON pl.id = np.place_id
@@ -72,6 +97,9 @@ dia_diem AS (
     LEFT JOIN v2.hotel_nearby_place_i18n npi
            ON npi.hotel_id = np.hotel_id AND npi.place_id = np.place_id
           AND npi.locale = pi.locale
+    LEFT JOIN ten_nhom tn
+           ON tn.locale = pi.locale
+          AND tn.group_code = COALESCE(npi.group_code, np.group_code)
     WHERE pi.name IS NOT NULL
       AND btrim(pi.name) <> ''
       AND btrim(pi.name) !~* '^(size\?|n/?a|null|-+|\?+)$'
@@ -145,23 +173,26 @@ rows AS (
     UNION ALL
     SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.trip_poi_id)::uuid,
            d.trip_hotel_id, 'SURROUNDING',
-           CASE d.group_code WHEN 2 THEN 'TRANSPORT'
-                             WHEN 3 THEN 'LANDMARK'
-                             WHEN 5 THEN 'SHOPPING'
-                             ELSE 'OTHER' END,
+           -- section_type = <mã nhóm>_<tên nhóm theo đúng ngôn ngữ đó>
+           -- ví dụ: '2_Giao thông' (vi)  /  '2_Transport' (en)
+           d.group_code || CASE WHEN COALESCE(d.group_name, '') <> ''
+                                THEN '_' || d.group_name ELSE '' END,
            d.locale::text,
            y.field, y.value, 3, COALESCE(d.sort_order, 0) * 10 + y.sub
     FROM dia_diem d
     CROSS JOIN LATERAL (VALUES
-        ('surrounding_group',      d.group_name,          1),
-        ('surrounding_name',       d.ten,                 2),
+        -- Không xuất surrounding_group / surrounding_group_id nữa: mã và tên
+        -- nhóm đã nằm trong section_type, tách ra bằng
+        --   split_part(section_type, '_', 1)                    -> mã nhóm
+        --   substr(section_type, strpos(section_type,'_') + 1)  -> tên nhóm
+        ('surrounding_name',       d.ten,                 1),
         ('surrounding_distance',
             CASE WHEN d.distance_km < 1
                  THEN round(d.distance_km * 1000)::bigint::text || 'm'
-                 ELSE replace(round(d.distance_km, 1)::text, '.', ',') || 'km' END, 3),
-        ('surrounding_distance_m', round(d.distance_km * 1000)::bigint::text, 4),
-        ('surrounding_lat',        d.latitude::text,      5),
-        ('surrounding_lng',        d.longitude::text,     6)
+                 ELSE replace(round(d.distance_km, 1)::text, '.', ',') || 'km' END, 2),
+        ('surrounding_distance_m', round(d.distance_km * 1000)::bigint::text, 3),
+        ('surrounding_lat',        d.latitude::text,      4),
+        ('surrounding_lng',        d.longitude::text,     5)
     ) AS y(field, value, sub)
 )
 SELECT 'INSERT INTO ' || :'pfx' || 'trip_tmp_property_translation '

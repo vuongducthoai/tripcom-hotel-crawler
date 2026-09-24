@@ -352,6 +352,65 @@ async def _wait_for_room_list(
     return _has_room_list(packets)
 
 
+# Khối địa điểm lân cận (API ctGetNearbyPlaceInfo) KHÔNG tự chạy khi chỉ cuộn
+# trang: bản tiếng Việt hiện sẵn khối "Xem xung quanh đây", còn bản tiếng Anh
+# giấu nó sau tab "Location" trên thanh mục lục — phải bấm vào mới nạp.
+# Bấm đúng một lần, không thấy tab thì thôi, không coi là lỗi.
+NHAN_MUC_VI_TRI = ("Location", "Vị trí", "Vị Trí", "Xem Trên Bản Đồ", "View on Map")
+
+
+def _co_nearby(packets) -> bool:
+    return any("ctGetNearbyPlaceInfo" in str(x.get("url", "")) for x in packets)
+
+
+async def _mo_muc_vi_tri(page, tasks, packets) -> bool:
+    """Bấm mục 'Vị trí / Location' để trang gọi ctGetNearbyPlaceInfo.
+
+    Bản tiếng Việt hiện sẵn khối 'Xem xung quanh đây' khi cuộn tới, còn bản
+    tiếng Anh giấu sau một tab phải bấm. In rõ đã thử gì để còn chỉnh.
+    """
+    if _co_nearby(packets):
+        print("   [vi-tri] API nearby đã có sẵn, không cần bấm.")
+        return True
+
+    cach = []
+    for nhan in NHAN_MUC_VI_TRI:
+        cach.append((f'role=tab "{nhan}"', lambda n=nhan: page.get_by_role("tab", name=n, exact=False)))
+        cach.append((f'role=button "{nhan}"', lambda n=nhan: page.get_by_role("button", name=n, exact=False)))
+        cach.append((f'role=link "{nhan}"', lambda n=nhan: page.get_by_role("link", name=n, exact=False)))
+        cach.append((f'text "{nhan}"', lambda n=nhan: page.get_by_text(n, exact=True)))
+
+    for ten_cach, lay in cach:
+        try:
+            loc = lay()
+            n = await loc.count()
+        except Exception as e:
+            print(f"   [vi-tri] {ten_cach}: lỗi dò ({type(e).__name__})")
+            continue
+        if n == 0:
+            continue
+        for i in range(min(n, 3)):
+            try:
+                muc = loc.nth(i)
+                if not await muc.is_visible():
+                    continue
+                await muc.scroll_into_view_if_needed(timeout=2000)
+                await muc.click(timeout=3000)
+                print(f"   [vi-tri] đã bấm {ten_cach} (phần tử {i})")
+            except Exception as e:
+                print(f"   [vi-tri] {ten_cach} phần tử {i}: bấm hỏng ({type(e).__name__})")
+                continue
+            await _wait_for_capture_quiet(
+                tasks, packets, min_wait_ms=800, max_wait_ms=6000, quiet_ms=600
+            )
+            if _co_nearby(packets):
+                print("   [vi-tri] ✔ bắt được ctGetNearbyPlaceInfo")
+                return True
+
+    print("   [vi-tri] ✘ không tìm/bấm được mục Vị trí — trang EN có thể dùng nhãn khác")
+    return False
+
+
 # Schema v2 cần khối hotelDetailResponse của trang (sao, tọa độ, thành phố,
 # chính sách có cấu trúc…). Khối này nằm sẵn trong HTML (dữ liệu Next.js
 # self.__next_f), không phải một API riêng — đọc thẳng từ trang, không tốn
@@ -496,6 +555,9 @@ async def crawl_one(
         # getHotelRoomList thì phải chờ thêm, nếu không sẽ ghi nhận "không có
         # phòng" trong khi thực ra chỉ là chưa kịp về.
         await _wait_for_room_list(tasks, packets, page)
+
+        # Mục "Vị trí / Location" phải bấm mới nạp địa điểm lân cận.
+        await _mo_muc_vi_tri(page, tasks, packets)
 
         # JSON-LD thường chứa mô tả/ảnh ngay cả khi API đổi endpoint.
         for script in await page.locator("script[type='application/ld+json']").all_text_contents():
