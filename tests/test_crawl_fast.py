@@ -61,6 +61,31 @@ class BocTuHtml(unittest.TestCase):
         urls = [p["url"] for p in cf.packets_from_html(html)]
         self.assertEqual(urls, [cf.DETAIL_BLOCK_URL, "embedded:json-ld", "embedded:page-meta"])
 
+    def test_boc_phong_tinh_tu_ssr(self):
+        room_payload = {"data": {"physicRoomMap": {
+            "501": {"id": 501, "name": "Phòng Deluxe"}}}}
+        chunk = json.dumps(json.dumps(room_payload, ensure_ascii=False), ensure_ascii=False)
+        room_script = "<script>self.__next_f.push([1," + chunk + "])</script>"
+        html = fake_html(DETAIL).replace("</body>", room_script + "</body>")
+        packets = cf.packets_from_html(html)
+        rooms = [p for p in packets if p["url"] == "embedded:hotel-rooms"]
+        self.assertEqual(len(rooms), 1)
+        self.assertIn("physicRoomMap", rooms[0]["response"])
+
+
+class ChatLuongRaw(unittest.TestCase):
+    def test_api_live_giau_hon_ssr_tinh(self):
+        static = {"normalized": {"success": True}, "responses": [
+            {"url": cf.DETAIL_BLOCK_URL, "response": DETAIL},
+            {"url": "embedded:hotel-rooms", "response": {"physicRoomMap": {"1": {}}}},
+        ]}
+        live = {"normalized": {"success": True}, "responses": [
+            {"url": cf.DETAIL_BLOCK_URL, "response": DETAIL},
+            {"url": "https://x/getHotelRoomListOversea", "response": {
+                "data": {"physicRoomMap": {"1": {}}, "saleRoomMap": {"x": {"id": 1}}}}},
+        ]}
+        self.assertGreater(cf._dump_quality(live), cf._dump_quality(static))
+
 
 class NhanDienChan(unittest.TestCase):
     def test_trang_dang_nhap(self):

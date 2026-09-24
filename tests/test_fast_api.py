@@ -1,6 +1,8 @@
 """Kiểm tra phần thay số liệu khi gọi lại API — offline, không cần mạng."""
 from __future__ import annotations
 
+import copy
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -64,6 +66,18 @@ class ThaySoLieu(unittest.TestCase):
                                          "2026-11-20", "2026-11-21", CTX)
         self.assertTrue(url.endswith("getHotelRoomListOversea"))
         self.assertEqual(headers["content-type"], "application/json")
+
+    def test_dong_bo_visitor_id_voi_cookie_hien_tai(self):
+        mau = copy.deepcopy(MAU)
+        body = json.loads(mau["apis"]["getHotelRoomListOversea"]["post_data"])
+        body["head"].update(cid="old", vid="old")
+        mau["apis"]["getHotelRoomListOversea"]["post_data"] = json.dumps(body)
+        _, _, result = fa.payload_for(
+            mau, "getHotelRoomListOversea", "123456",
+            "2026-10-05", "2026-10-06", CTX,
+            visitor_id="current-ubt-vid")
+        self.assertEqual(result["head"]["cid"], "current-ubt-vid")
+        self.assertEqual(result["head"]["vid"], "current-ubt-vid")
 
     def test_context_tu_khoi_detail(self):
         ctx = fa.context_from_detail({"hotelBaseInfo": {"cityId": 7, "provinceId": 8}})

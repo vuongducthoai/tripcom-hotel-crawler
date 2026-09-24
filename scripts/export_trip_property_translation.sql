@@ -1,26 +1,57 @@
 -- =============================================================================
--- Xuất dữ liệu v2 sang bảng splatform_meta.trip_property_translation (bản 2)
+-- Xuất dữ liệu v2 sang bảng splatform_meta.trip_tmp_property_translation
 --
---   psql ... -At -f scripts/export_trip_property_translation.sql > dump.sql
+--   psql ... -At -f scripts/export_trip_property_translation.sql            > dump.sql
+--   psql ... -At -v pfx= -f scripts/export_trip_property_translation.sql   > dump.txt
 --
--- Cấu trúc mới: mỗi bản ghi logic là một row_uuid, gom nhiều dòng field/value.
+-- Mỗi bản ghi logic là một row_uuid, gom nhiều dòng field/value:
 --   type = DESCRIPTION  → 1 row_uuid / khách sạn
 --   type = POLICY       → 1 row_uuid / mục chính sách
 --   type = SURROUNDING  → 1 row_uuid / địa điểm gần đây
 --
--- row_uuid sinh bằng md5 từ khoá nghiệp vụ nên KHÔNG đổi giữa các lần xuất —
--- chạy lại vẫn ra đúng uuid cũ, tiện cho việc nạp lại hoặc đối chiếu.
+-- row_uuid KHÔNG chứa lang: bản tiếng Việt và bản tiếng Anh của cùng một bản
+-- ghi dùng CHUNG một row_uuid, chỉ khác cột lang. Nhờ đó ghép được
+-- "Thời gian nhận và trả phòng" ↔ "Check-in and Check-out Times".
+-- Khoá nghiệp vụ dùng mã bất biến theo ngôn ngữ:
+--   DESCRIPTION → trip_hotel_id
+--   POLICY      → trip_hotel_id + section_code ('checkInAndOut')
+--   SURROUNDING → trip_hotel_id + trip_poi_id (mã POI của Trip.com)
+-- Sinh bằng md5 nên chạy lại vẫn ra đúng uuid cũ, tiện nạp lại / đối chiếu.
+--
+-- section_type giữ NGUYÊN giá trị Trip.com trả về:
+--   POLICY      → tên key trong hotelPolicyInfo ('checkInAndOut', 'pet'…)
+--   SURROUNDING → tên nhóm chuẩn hoá từ group_code của Trip.com:
+--                  2 → TRANSPORT, 3 → LANDMARK, 5 → SHOPPING, khác → OTHER
+--                  (Trip.com chỉ trả số, không có tên mã, nên phải tự đặt;
+--                   không dùng tên hiển thị vì tên đó bị dịch theo ngôn ngữ)
+--   DESCRIPTION → 'hotelInfo' (Trip.com không có mã cho phần này)
 --
 -- Đổi LIMIT / bỏ chú thích dòng lọc thành phố ở CTE "sel" nếu cần.
 -- =============================================================================
+-- Tiền tố schema: mặc định splatform_meta. ; chạy với -v pfx= để bỏ tiền tố.
+\if :{?pfx}
+\else
+\set pfx 'splatform_meta.'
+\endif
+
 WITH sel AS (
+    -- Ưu tiên khách sạn có ĐỦ CẢ tiếng Việt và tiếng Anh, để file dump thể hiện
+    -- được việc ghép cặp theo row_uuid. Khách sạn chỉ có một thứ tiếng xếp sau.
     SELECT h.id, h.trip_hotel_id, h.room_count, h.city_id
     FROM v2.hotels h
-    JOIN v2.hotel_i18n i ON i.hotel_id = h.id AND i.locale LIKE 'vi%'
+    JOIN v2.hotel_i18n vi ON vi.hotel_id = h.id AND vi.locale LIKE 'vi%'
+                         AND vi.description IS NOT NULL
+    LEFT JOIN v2.hotel_i18n en ON en.hotel_id = h.id AND en.locale LIKE 'en%'
+                              AND en.description IS NOT NULL
     -- JOIN v2.cities c ON c.id = h.city_id AND c.trip_city_id = 495   -- chỉ New Delhi
-    WHERE i.description IS NOT NULL
-    ORDER BY h.id
-    LIMIT 10
+    ORDER BY (en.hotel_id IS NULL),                                      -- 1. có bản EN trước
+             (SELECT count(*) FROM v2.hotel_policy_sections ps
+               WHERE ps.hotel_id = h.id AND ps.locale LIKE 'en%') DESC,  -- 2. nhiều chính sách EN
+             (SELECT count(*) FROM v2.hotel_nearby_places np
+                JOIN v2.place_i18n pi ON pi.place_id = np.place_id
+               WHERE np.hotel_id = h.id AND pi.locale LIKE 'en%') DESC,  -- 3. có POI tiếng Anh
+             h.id
+    LIMIT 20
 ),
 
 -- Mã quốc gia ISO 3166-1 alpha-2 theo countryId của Trip.com.
@@ -32,9 +63,8 @@ ma_quoc_gia (trip_country_id, iso2) AS (VALUES
 -- Địa điểm gần đây đã lọc rác: Trip.com thỉnh thoảng trả tên placeholder
 -- kiểu "size?" — bỏ cả địa điểm đó chứ không lưu nửa vời.
 dia_diem AS (
-    SELECT s.trip_hotel_id, pi.locale, np.place_id, np.sort_order,
-           pi.name AS ten, np.distance_km, pl.latitude, pl.longitude,
-           npi.group_name
+    SELECT s.trip_hotel_id, pi.locale, pl.trip_poi_id, np.sort_order, np.group_code,
+           pi.name AS ten, np.distance_km, pl.latitude, pl.longitude, npi.group_name
     FROM sel s
     JOIN v2.hotel_nearby_places np ON np.hotel_id = s.id
     JOIN v2.places      pl ON pl.id = np.place_id
@@ -47,64 +77,11 @@ dia_diem AS (
       AND btrim(pi.name) !~* '^(size\?|n/?a|null|-+|\?+)$'
 ),
 
-rows AS (
-    -- ------------------------------------------------ DESCRIPTION
-    SELECT md5(s.trip_hotel_id || ':DESCRIPTION:' || i.locale)::uuid AS row_uuid,
-           s.trip_hotel_id AS property_id,
-           'DESCRIPTION'   AS type,
-           i.locale::text  AS lang,
-           'hotel_name'    AS field,
-           i.name          AS value,
-           1 AS ord, 1 AS sub
-    FROM sel s JOIN v2.hotel_i18n i ON i.hotel_id = s.id
-    WHERE i.name IS NOT NULL
-
-    UNION ALL
-    SELECT md5(s.trip_hotel_id || ':DESCRIPTION:' || i.locale)::uuid, s.trip_hotel_id,
-           'DESCRIPTION', i.locale::text, 'local_name', i.local_name, 1, 2
-    FROM sel s JOIN v2.hotel_i18n i ON i.hotel_id = s.id
-    WHERE i.local_name IS NOT NULL
-
-    UNION ALL
-    SELECT md5(s.trip_hotel_id || ':DESCRIPTION:' || i.locale)::uuid, s.trip_hotel_id,
-           'DESCRIPTION', i.locale::text, 'hotel_address', i.address, 1, 3
-    FROM sel s JOIN v2.hotel_i18n i ON i.hotel_id = s.id
-    WHERE i.address IS NOT NULL
-
-    UNION ALL
-    SELECT md5(s.trip_hotel_id || ':DESCRIPTION:' || i.locale)::uuid, s.trip_hotel_id,
-           'DESCRIPTION', i.locale::text, 'countryCode', q.iso2, 1, 4
-    FROM sel s
-    JOIN v2.hotel_i18n i ON i.hotel_id = s.id
-    JOIN v2.cities c    ON c.id = s.city_id
-    JOIN v2.countries co ON co.id = c.country_id
-    JOIN ma_quoc_gia q  ON q.trip_country_id = co.trip_country_id
-
-    UNION ALL
-    SELECT md5(s.trip_hotel_id || ':DESCRIPTION:' || i.locale)::uuid, s.trip_hotel_id,
-           'DESCRIPTION', i.locale::text, 'room_count', s.room_count::text, 1, 5
-    FROM sel s JOIN v2.hotel_i18n i ON i.hotel_id = s.id
-    WHERE s.room_count IS NOT NULL
-
-    UNION ALL
-    SELECT md5(s.trip_hotel_id || ':DESCRIPTION:' || i.locale)::uuid, s.trip_hotel_id,
-           'DESCRIPTION', i.locale::text, 'description', i.description, 1, 6
-    FROM sel s JOIN v2.hotel_i18n i ON i.hotel_id = s.id
-    WHERE i.description IS NOT NULL
-
-    -- ------------------------------------------------ POLICY
-    UNION ALL
-    SELECT md5(s.trip_hotel_id || ':POLICY:' || ps.locale || ':' || ps.section_code)::uuid,
-           s.trip_hotel_id, 'POLICY', ps.locale::text, 'policy_title', ps.title,
-           2, ps.sort_order * 10
-    FROM sel s JOIN v2.hotel_policy_sections ps ON ps.hotel_id = s.id
-
-    UNION ALL
-    -- Nội dung gom cả mục thành một dòng HTML:
-    --   dòng có nhãn    → <p><strong>Nhận phòng</strong> 15:00</p>
-    --   dòng không nhãn → gom chung vào <ul><li>…</li></ul>
-    SELECT md5(s.trip_hotel_id || ':POLICY:' || pl.locale || ':' || pl.section_code)::uuid,
-           s.trip_hotel_id, 'POLICY', pl.locale::text, 'policy_content',
+-- Nội dung chính sách gom cả mục thành một dòng HTML:
+--   dòng có nhãn    → <p><strong>Nhận phòng</strong> 15:00</p>
+--   dòng không nhãn → gom chung vào <ul><li>…</li></ul>
+chinh_sach_html AS (
+    SELECT s.trip_hotel_id, pl.locale, pl.section_code, min(ps.sort_order) AS sort_order,
            COALESCE(string_agg(
                CASE WHEN COALESCE(pl.label, '') <> '' THEN
                    '<p><strong>'
@@ -120,63 +97,79 @@ rows AS (
                           || replace(replace(replace(pl.text, '&', '&amp;'), '<', '&lt;'), '>', '&gt;')
                           || '</li>'
                       END, '' ORDER BY pl.line_no) || '</ul>'
-              ELSE '' END,
-           2, min(ps.sort_order) * 10 + 1
+              ELSE '' END AS noi_dung
     FROM sel s
     JOIN v2.hotel_policy_lines pl ON pl.hotel_id = s.id
     JOIN v2.hotel_policy_sections ps
       ON ps.hotel_id = pl.hotel_id AND ps.locale = pl.locale
      AND ps.section_code = pl.section_code
     GROUP BY s.trip_hotel_id, pl.locale, pl.section_code
+),
+
+rows AS (
+    -- ------------------------------------------------ DESCRIPTION
+    SELECT md5(s.trip_hotel_id || ':DESCRIPTION')::uuid AS row_uuid,
+           s.trip_hotel_id AS property_id,
+           'DESCRIPTION'   AS type,
+           'hotelInfo'     AS section_type,
+           i.locale::text  AS lang,
+           x.field, x.value, 1 AS ord, x.sub
+    FROM sel s
+    JOIN v2.hotel_i18n i ON i.hotel_id = s.id
+    LEFT JOIN v2.cities c     ON c.id = s.city_id
+    LEFT JOIN v2.countries co ON co.id = c.country_id
+    LEFT JOIN ma_quoc_gia q   ON q.trip_country_id = co.trip_country_id
+    CROSS JOIN LATERAL (VALUES
+        ('hotel_name',    i.name,              1),
+        ('local_name',    i.local_name,        2),
+        ('hotel_address', i.address,           3),
+        ('countryCode',   q.iso2,              4),
+        ('room_count',    s.room_count::text,  5),
+        ('description',   i.description,       6)
+    ) AS x(field, value, sub)
+
+    -- ------------------------------------------------ POLICY
+    UNION ALL
+    SELECT md5(s.trip_hotel_id || ':POLICY:' || ps.section_code)::uuid,
+           s.trip_hotel_id, 'POLICY', ps.section_code, ps.locale::text,
+           'policy_title', ps.title, 2, ps.sort_order * 10
+    FROM sel s JOIN v2.hotel_policy_sections ps ON ps.hotel_id = s.id
+
+    UNION ALL
+    SELECT md5(h.trip_hotel_id || ':POLICY:' || h.section_code)::uuid,
+           h.trip_hotel_id, 'POLICY', h.section_code, h.locale::text,
+           'policy_content', h.noi_dung, 2, h.sort_order * 10 + 1
+    FROM chinh_sach_html h
 
     -- ------------------------------------------------ SURROUNDING
     UNION ALL
-    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.locale || ':' || d.place_id)::uuid,
-           d.trip_hotel_id, 'SURROUNDING', d.locale::text, 'surrounding_group',
-           d.group_name, 3, COALESCE(d.sort_order, 0) * 10 + 1
-    FROM dia_diem d WHERE d.group_name IS NOT NULL
-
-    UNION ALL
-    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.locale || ':' || d.place_id)::uuid,
-           d.trip_hotel_id, 'SURROUNDING', d.locale::text, 'surrounding_name',
-           d.ten, 3, COALESCE(d.sort_order, 0) * 10 + 2
+    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.trip_poi_id)::uuid,
+           d.trip_hotel_id, 'SURROUNDING',
+           CASE d.group_code WHEN 2 THEN 'TRANSPORT'
+                             WHEN 3 THEN 'LANDMARK'
+                             WHEN 5 THEN 'SHOPPING'
+                             ELSE 'OTHER' END,
+           d.locale::text,
+           y.field, y.value, 3, COALESCE(d.sort_order, 0) * 10 + y.sub
     FROM dia_diem d
-
-    UNION ALL
-    -- Khoảng cách định dạng giống trang Trip.com: "720m", "1,6km"
-    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.locale || ':' || d.place_id)::uuid,
-           d.trip_hotel_id, 'SURROUNDING', d.locale::text, 'surrounding_distance',
-           CASE WHEN d.distance_km < 1
-                THEN round(d.distance_km * 1000)::bigint::text || 'm'
-                ELSE replace(round(d.distance_km, 1)::text, '.', ',') || 'km' END,
-           3, COALESCE(d.sort_order, 0) * 10 + 3
-    FROM dia_diem d WHERE d.distance_km IS NOT NULL
-
-    UNION ALL
-    -- Khoảng cách dạng số mét, để sắp xếp và tính toán
-    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.locale || ':' || d.place_id)::uuid,
-           d.trip_hotel_id, 'SURROUNDING', d.locale::text, 'surrounding_distance_m',
-           round(d.distance_km * 1000)::bigint::text,
-           3, COALESCE(d.sort_order, 0) * 10 + 4
-    FROM dia_diem d WHERE d.distance_km IS NOT NULL
-
-    UNION ALL
-    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.locale || ':' || d.place_id)::uuid,
-           d.trip_hotel_id, 'SURROUNDING', d.locale::text, 'surrounding_lat',
-           d.latitude::text, 3, COALESCE(d.sort_order, 0) * 10 + 5
-    FROM dia_diem d WHERE d.latitude IS NOT NULL
-
-    UNION ALL
-    SELECT md5(d.trip_hotel_id || ':SURROUNDING:' || d.locale || ':' || d.place_id)::uuid,
-           d.trip_hotel_id, 'SURROUNDING', d.locale::text, 'surrounding_lng',
-           d.longitude::text, 3, COALESCE(d.sort_order, 0) * 10 + 6
-    FROM dia_diem d WHERE d.longitude IS NOT NULL
+    CROSS JOIN LATERAL (VALUES
+        ('surrounding_group',      d.group_name,          1),
+        ('surrounding_name',       d.ten,                 2),
+        ('surrounding_distance',
+            CASE WHEN d.distance_km < 1
+                 THEN round(d.distance_km * 1000)::bigint::text || 'm'
+                 ELSE replace(round(d.distance_km, 1)::text, '.', ',') || 'km' END, 3),
+        ('surrounding_distance_m', round(d.distance_km * 1000)::bigint::text, 4),
+        ('surrounding_lat',        d.latitude::text,      5),
+        ('surrounding_lng',        d.longitude::text,     6)
+    ) AS y(field, value, sub)
 )
-SELECT 'INSERT INTO splatform_meta.trip_property_translation '
-       || '(row_uuid, property_id, type, lang, field, value) VALUES ('
+SELECT 'INSERT INTO ' || :'pfx' || 'trip_tmp_property_translation '
+       || '(row_uuid, property_id, type, section_type, lang, field, value) VALUES ('
        || quote_literal(row_uuid::text) || ', '
        || property_id || ', '
        || quote_literal(type) || ', '
+       || quote_literal(section_type) || ', '
        || quote_literal(lang) || ', '
        || quote_literal(field) || ', '
        || quote_nullable(value) || ');'

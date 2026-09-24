@@ -337,8 +337,37 @@ def record_detail(table_name: str, query: dict[str, list[str]]) -> dict[str, Any
     return {"table": table_name, "key": key, "values": values, "relations": relations}
 
 
+def cities() -> dict[str, Any]:
+    """Các thành phố ĐÃ có khách sạn trong schema v2, kèm số lượng.
+
+    Web không còn gắn cứng TP.HCM: cào hoặc nạp thành phố nào thì thành phố đó
+    tự hiện ra ở ô chọn.
+    """
+    sql = """
+        SELECT c.trip_city_id,
+               COALESCE(ci_vi.name, ci_en.name, '(chưa có tên)') AS name_vi,
+               COALESCE(ci_en.name, ci_vi.name)                  AS name_en,
+               COALESCE(co_vi.name, co_en.name)                  AS country_vi,
+               COALESCE(co_en.name, co_vi.name)                  AS country_en,
+               count(h.id)                                       AS hotel_count
+        FROM v2.cities c
+        JOIN v2.hotels h        ON h.city_id = c.id
+        LEFT JOIN v2.city_i18n ci_vi    ON ci_vi.city_id = c.id AND ci_vi.locale = 'vi'
+        LEFT JOIN v2.city_i18n ci_en    ON ci_en.city_id = c.id AND ci_en.locale = 'en'
+        LEFT JOIN v2.countries co       ON co.id = c.country_id
+        LEFT JOIN v2.country_i18n co_vi ON co_vi.country_id = co.id AND co_vi.locale = 'vi'
+        LEFT JOIN v2.country_i18n co_en ON co_en.country_id = co.id AND co_en.locale = 'en'
+        GROUP BY c.trip_city_id, ci_vi.name, ci_en.name, co_vi.name, co_en.name
+        ORDER BY count(h.id) DESC, 2
+    """
+    with db_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql)
+        rows = [dict(row) for row in cur.fetchall()]
+    return {"cities": rows, "total": sum(int(r["hotel_count"]) for r in rows)}
+
+
 def hotel_rows(query: dict[str, list[str]]) -> dict[str, Any]:
-    """Return a mentor-friendly, paginated hotel catalogue."""
+    """Danh mục khách sạn, đọc từ schema v2 (đa thành phố, song ngữ)."""
     limit = _int_value(_query_value(query, "limit", "20"), 20, 1, 60)
     offset = _int_value(_query_value(query, "offset", "0"), 0, 0, 10_000_000)
     search = _query_value(query, "search").strip()[:200]
@@ -351,32 +380,34 @@ def hotel_rows(query: dict[str, list[str]]) -> dict[str, Any]:
     star = _query_value(query, "star")
     detail_status = _query_value(query, "status")
     sort_name = _query_value(query, "sort", "recent")
+    city = _query_value(query, "city").strip()
 
     where_parts = ["TRUE"]
     where_params: list[Any] = []
+    if city.isdigit():
+        where_parts.append("c.trip_city_id = %s")
+        where_params.append(int(city))
     if search:
         where_parts.append(
             "(h.trip_hotel_id::text ILIKE %s OR EXISTS ("
-            "SELECT 1 FROM hotel_translations sx WHERE sx.hotel_id=h.id "
+            "SELECT 1 FROM v2.hotel_i18n sx WHERE sx.hotel_id = h.id "
             "AND (sx.name ILIKE %s OR sx.address ILIKE %s)))"
         )
         term = f"%{search}%"
         where_params.extend([term, term, term])
     if star in {"1", "2", "3", "4", "5"}:
-        where_parts.append("h.star_rating = %s")
+        where_parts.append("h.star_level = %s")
         where_params.append(int(star))
-    # The migration creates name-only EN placeholders for every hotel.  Do not
-    # present those rows as crawled English data in the mentor-facing catalogue.
-    if locale == "en":
-        where_parts.append(
-            "EXISTS (SELECT 1 FROM hotel_translations en_ready "
-            "WHERE en_ready.hotel_id=h.id AND en_ready.locale='en' "
-            "AND en_ready.address IS NOT NULL)"
-        )
+    # Chỉ coi là "có bản ngôn ngữ này" khi thật sự đã cào, không tính bản ghi rỗng.
+    where_parts.append(
+        "EXISTS (SELECT 1 FROM v2.hotel_i18n rdy WHERE rdy.hotel_id = h.id "
+        "AND rdy.locale = %s AND rdy.address IS NOT NULL)"
+    )
+    where_params.append(locale)
 
-    has_images = "EXISTS (SELECT 1 FROM hotel_images x WHERE x.hotel_id=h.id)"
-    has_amenities = "EXISTS (SELECT 1 FROM hotel_amenities x WHERE x.hotel_id=h.id)"
-    has_rooms = "EXISTS (SELECT 1 FROM room_types x WHERE x.hotel_id=h.id)"
+    has_images = "EXISTS (SELECT 1 FROM v2.hotel_images x WHERE x.hotel_id = h.id)"
+    has_amenities = "EXISTS (SELECT 1 FROM v2.hotel_amenities x WHERE x.hotel_id = h.id)"
+    has_rooms = "EXISTS (SELECT 1 FROM v2.room_types x WHERE x.hotel_id = h.id)"
     if detail_status == "complete":
         where_parts.append(f"{has_images} AND {has_amenities} AND {has_rooms}")
     elif detail_status == "partial":
@@ -389,58 +420,74 @@ def hotel_rows(query: dict[str, list[str]]) -> dict[str, Any]:
 
     where_sql = " AND ".join(where_parts)
     order_sql = {
-        "rating": "h.review_score DESC NULLS LAST, h.review_count DESC NULLS LAST",
-        "reviews": "h.review_count DESC NULLS LAST, h.review_score DESC NULLS LAST",
-        "stars": "h.star_rating DESC NULLS LAST, h.review_score DESC NULLS LAST",
+        "rating": "r.rating_overall DESC NULLS LAST, r.review_count DESC NULLS LAST",
+        "reviews": "r.review_count DESC NULLS LAST, r.rating_overall DESC NULLS LAST",
+        "stars": "h.star_level DESC NULLS LAST, r.rating_overall DESC NULLS LAST",
         "name": "COALESCE(t.name, '') ASC, h.id ASC",
-        "recent": "h.last_seen_at DESC NULLS LAST, h.id DESC",
-    }.get(sort_name, "h.last_seen_at DESC NULLS LAST, h.id DESC")
+        "recent": "h.updated_at DESC NULLS LAST, h.id DESC",
+    }.get(sort_name, "h.updated_at DESC NULLS LAST, h.id DESC")
 
-    select_sql = f"""
-        SELECT h.id, h.trip_hotel_id, h.url, h.latitude, h.longitude,
-               h.star_rating, h.review_score, h.review_count,
-               h.first_seen_at, h.last_seen_at,
-               t.locale, t.name, t.address, t.description, t.hotel_type,
-               image.url AS image_url,
-               price.min_price,
-               (SELECT count(*) FROM hotel_images x WHERE x.hotel_id=h.id) AS image_count,
-               (SELECT count(*) FROM hotel_amenities x WHERE x.hotel_id=h.id) AS amenity_count,
-               (SELECT count(*) FROM room_types x WHERE x.hotel_id=h.id) AS room_count,
-               (SELECT count(*) FROM hotel_policies x WHERE x.hotel_id=h.id) AS policy_count,
-               (SELECT count(*) FROM hotel_nearby_places x WHERE x.hotel_id=h.id) AS nearby_count
-        FROM hotels h
+    from_sql = """
+        FROM v2.hotels h
+        LEFT JOIN v2.cities c ON c.id = h.city_id
+        LEFT JOIN v2.hotel_review_summary r ON r.hotel_id = h.id
         LEFT JOIN LATERAL (
-            SELECT ht.locale, ht.name, ht.address, ht.description, ht.hotel_type
-            FROM hotel_translations ht
-            WHERE ht.hotel_id=h.id AND ht.locale IN (%s, 'vi', 'en')
-            ORDER BY CASE WHEN ht.locale=%s THEN 0 WHEN ht.locale='vi' THEN 1 ELSE 2 END
+            SELECT hi.locale, hi.name, hi.address, hi.description, hi.hotel_type
+            FROM v2.hotel_i18n hi
+            WHERE hi.hotel_id = h.id AND hi.locale IN (%s, 'vi', 'en')
+            ORDER BY CASE WHEN hi.locale = %s THEN 0 WHEN hi.locale = 'vi' THEN 1 ELSE 2 END
             LIMIT 1
         ) t ON TRUE
+    """
+    select_sql = f"""
+        SELECT h.id, h.trip_hotel_id, h.detail_url AS url, h.latitude, h.longitude,
+               h.star_level AS star_rating, h.star_type,
+               r.rating_overall AS review_score, r.review_count,
+               h.first_seen_at, h.updated_at AS last_seen_at,
+               t.locale, t.name, t.address, t.description, t.hotel_type,
+               c.trip_city_id,
+               COALESCE(ci_pref.name, ci_vi.name, ci_en.name) AS city_name,
+               COALESCE(co_pref.name, co_vi.name, co_en.name) AS country_name,
+               image.url AS image_url,
+               price.min_price,
+               (SELECT count(*) FROM v2.hotel_images x WHERE x.hotel_id = h.id) AS image_count,
+               (SELECT count(*) FROM v2.hotel_amenities x WHERE x.hotel_id = h.id) AS amenity_count,
+               (SELECT count(*) FROM v2.room_types x WHERE x.hotel_id = h.id) AS room_count,
+               (SELECT count(*) FROM v2.hotel_policy_sections x WHERE x.hotel_id = h.id) AS policy_count,
+               (SELECT count(*) FROM v2.hotel_nearby_places x WHERE x.hotel_id = h.id) AS nearby_count
+        {from_sql}
+        LEFT JOIN v2.city_i18n ci_pref ON ci_pref.city_id = c.id AND ci_pref.locale = %s
+        LEFT JOIN v2.city_i18n ci_vi   ON ci_vi.city_id = c.id AND ci_vi.locale = 'vi'
+        LEFT JOIN v2.city_i18n ci_en   ON ci_en.city_id = c.id AND ci_en.locale = 'en'
+        LEFT JOIN v2.countries co         ON co.id = c.country_id
+        LEFT JOIN v2.country_i18n co_pref ON co_pref.country_id = co.id AND co_pref.locale = %s
+        LEFT JOIN v2.country_i18n co_vi   ON co_vi.country_id = co.id AND co_vi.locale = 'vi'
+        LEFT JOIN v2.country_i18n co_en   ON co_en.country_id = co.id AND co_en.locale = 'en'
         LEFT JOIN LATERAL (
-            SELECT hi.url FROM hotel_images hi
-            WHERE hi.hotel_id=h.id
-            ORDER BY hi.sort_order NULLS LAST, hi.id
+            SELECT hi.url FROM v2.hotel_images hi
+            WHERE hi.hotel_id = h.id
+            ORDER BY hi.is_cover DESC, hi.sort_order NULLS LAST, hi.id
             LIMIT 1
         ) image ON TRUE
         LEFT JOIN LATERAL (
-            SELECT min(hp.price) AS min_price FROM hotel_prices hp
-            WHERE hp.hotel_id=h.id AND hp.currency=%s AND hp.price IS NOT NULL
-              AND hp.captured_date=(
-                  SELECT max(hp2.captured_date) FROM hotel_prices hp2
-                  WHERE hp2.hotel_id=h.id AND hp2.currency=%s
+            SELECT min(ps.min_price) AS min_price FROM v2.hotel_price_snapshots ps
+            WHERE ps.hotel_id = h.id AND ps.currency = %s AND ps.min_price IS NOT NULL
+              AND ps.captured_date = (
+                  SELECT max(ps2.captured_date) FROM v2.hotel_price_snapshots ps2
+                  WHERE ps2.hotel_id = h.id AND ps2.currency = %s
               )
         ) price ON TRUE
         WHERE {where_sql}
         ORDER BY CASE WHEN h.trip_hotel_id::text = ANY(%s) THEN 0 ELSE 1 END, {order_sql}
         LIMIT %s OFFSET %s
     """
-    count_sql = f"SELECT count(*) AS total FROM hotels h WHERE {where_sql}"
+    count_sql = f"SELECT count(*) AS total {from_sql} WHERE {where_sql}"
     with db_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(count_sql, where_params)
+        cur.execute(count_sql, [locale, locale, *where_params])
         total = int(cur.fetchone()["total"])
         cur.execute(
             select_sql,
-            [locale, locale, currency, currency, *where_params,
+            [locale, locale, locale, locale, currency, currency, *where_params,
              FEATURED_HOTEL_IDS, limit, offset],
         )
         rows = [dict(row) for row in cur.fetchall()]
@@ -453,44 +500,55 @@ def hotel_rows(query: dict[str, list[str]]) -> dict[str, Any]:
             row["description"] = row["description"][:257].rstrip() + "..."
     return {
         "rows": rows, "total": total, "limit": limit, "offset": offset,
-        "locale": locale, "currency": currency,
+        "locale": locale, "currency": currency, "city": city,
     }
 
 
 def hotel_detail(hotel_id: int, locale: str) -> dict[str, Any]:
+    """Thông tin đầu trang chi tiết, đọc từ schema v2."""
     if locale not in {"vi", "en"}:
         locale = "vi"
     with db_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT h.id, h.trip_hotel_id, h.url, h.location_id, h.latitude, h.longitude,
-                   h.star_rating, h.review_score, h.review_count,
-                   h.first_seen_at, h.last_seen_at,
-                   t.locale, t.name, t.address, t.description, t.hotel_type,
-                   COALESCE(lt.name, l.name, l.name_en) AS location_name,
-                   l.type AS location_type, l.country_code,
-                   (SELECT count(*) FROM hotel_images x WHERE x.hotel_id=h.id) AS image_count,
-                   (SELECT count(*) FROM hotel_amenities x WHERE x.hotel_id=h.id) AS amenity_count,
-                   (SELECT count(*) FROM room_types x WHERE x.hotel_id=h.id) AS room_count,
-                   (SELECT count(*) FROM hotel_prices x WHERE x.hotel_id=h.id) AS price_count,
-                   (SELECT count(*) FROM hotel_policies x WHERE x.hotel_id=h.id) AS policy_count,
-                   (SELECT count(*) FROM hotel_nearby_places x WHERE x.hotel_id=h.id) AS nearby_count
-            FROM hotels h
+            SELECT h.id, h.trip_hotel_id, h.detail_url AS url, h.city_id AS location_id,
+                   h.latitude, h.longitude,
+                   h.star_level AS star_rating, h.star_type, h.room_count AS hotel_room_count,
+                   h.open_year, h.renovated_year,
+                   r.rating_overall AS review_score, r.review_count,
+                   h.first_seen_at, h.updated_at AS last_seen_at,
+                   t.locale, t.name, t.local_name, t.address, t.description, t.hotel_type,
+                   t.zone_name, t.traffic_desc,
+                   c.trip_city_id,
+                   COALESCE(ci_pref.name, ci_vi.name, ci_en.name) AS location_name,
+                   COALESCE(co_pref.name, co_vi.name, co_en.name) AS country_name,
+                   co.iso2 AS country_code,
+                   (SELECT count(*) FROM v2.hotel_images x WHERE x.hotel_id = h.id) AS image_count,
+                   (SELECT count(*) FROM v2.hotel_amenities x WHERE x.hotel_id = h.id) AS amenity_count,
+                   (SELECT count(*) FROM v2.room_types x WHERE x.hotel_id = h.id) AS room_count,
+                   (SELECT count(*) FROM v2.room_offers o JOIN v2.room_types rt ON rt.id = o.room_type_id
+                     WHERE rt.hotel_id = h.id) AS price_count,
+                   (SELECT count(*) FROM v2.hotel_policy_sections x WHERE x.hotel_id = h.id) AS policy_count,
+                   (SELECT count(*) FROM v2.hotel_nearby_places x WHERE x.hotel_id = h.id) AS nearby_count
+            FROM v2.hotels h
+            LEFT JOIN v2.hotel_review_summary r ON r.hotel_id = h.id
+            LEFT JOIN v2.cities c ON c.id = h.city_id
+            LEFT JOIN v2.city_i18n ci_pref ON ci_pref.city_id = c.id AND ci_pref.locale = %s
+            LEFT JOIN v2.city_i18n ci_vi   ON ci_vi.city_id = c.id AND ci_vi.locale = 'vi'
+            LEFT JOIN v2.city_i18n ci_en   ON ci_en.city_id = c.id AND ci_en.locale = 'en'
+            LEFT JOIN v2.countries co         ON co.id = c.country_id
+            LEFT JOIN v2.country_i18n co_pref ON co_pref.country_id = co.id AND co_pref.locale = %s
+            LEFT JOIN v2.country_i18n co_vi   ON co_vi.country_id = co.id AND co_vi.locale = 'vi'
+            LEFT JOIN v2.country_i18n co_en   ON co_en.country_id = co.id AND co_en.locale = 'en'
             LEFT JOIN LATERAL (
-                SELECT ht.locale, ht.name, ht.address, ht.description, ht.hotel_type
-                FROM hotel_translations ht
-                WHERE ht.hotel_id=h.id AND ht.locale IN (%s, 'vi', 'en')
-                ORDER BY CASE WHEN ht.locale=%s THEN 0 WHEN ht.locale='vi' THEN 1 ELSE 2 END
+                SELECT hi.locale, hi.name, hi.local_name, hi.address, hi.description,
+                       hi.hotel_type, hi.zone_name, hi.traffic_desc
+                FROM v2.hotel_i18n hi
+                WHERE hi.hotel_id = h.id AND hi.locale IN (%s, 'vi', 'en')
+                ORDER BY CASE WHEN hi.locale = %s THEN 0 WHEN hi.locale = 'vi' THEN 1 ELSE 2 END
                 LIMIT 1
             ) t ON TRUE
-            LEFT JOIN locations l ON l.id=h.location_id
-            LEFT JOIN LATERAL (
-                SELECT name FROM location_translations
-                WHERE location_id=l.id AND locale IN (%s, 'vi', 'en')
-                ORDER BY CASE WHEN locale=%s THEN 0 WHEN locale='vi' THEN 1 ELSE 2 END
-                LIMIT 1
-            ) lt ON TRUE
-            WHERE h.id=%s
+            WHERE h.id = %s
             """,
             (locale, locale, locale, locale, hotel_id),
         )
@@ -499,9 +557,8 @@ def hotel_detail(hotel_id: int, locale: str) -> dict[str, Any]:
             raise LookupError("Không tìm thấy khách sạn.")
         cur.execute(
             """
-            SELECT locale, name, address, description, hotel_type, source_url,
-                   crawled_at, updated_at
-            FROM hotel_translations WHERE hotel_id=%s
+            SELECT locale, name, local_name, address, description, hotel_type
+            FROM v2.hotel_i18n WHERE hotel_id = %s
             ORDER BY CASE locale WHEN 'vi' THEN 0 WHEN 'en' THEN 1 ELSE 2 END
             """,
             (hotel_id,),
@@ -514,31 +571,33 @@ def hotel_detail(hotel_id: int, locale: str) -> dict[str, Any]:
 
 
 def hotel_section(hotel_id: int, section: str, locale: str) -> dict[str, Any]:
+    """Từng tab của trang chi tiết, đọc từ schema v2."""
     if locale not in {"vi", "en"}:
         locale = "vi"
     allowed = {"images", "amenities", "rooms", "prices", "policies", "nearby", "raw"}
     if section not in allowed:
         raise ValueError("Phân mục khách sạn không hợp lệ.")
     with db_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT 1 FROM hotels WHERE id=%s", (hotel_id,))
+        cur.execute("SELECT 1 FROM v2.hotels WHERE id = %s", (hotel_id,))
         if cur.fetchone() is None:
             raise LookupError("Không tìm thấy khách sạn.")
 
         if section == "images":
             cur.execute(
                 """
-                SELECT hi.id, hi.url, hi.category AS source_category, hi.sort_order,
-                       c.category_code, c.category_name, c.image_title, c.locale
-                FROM hotel_images hi
-                LEFT JOIN LATERAL (
-                    SELECT hic.category_code, hic.category_name, hic.image_title, hic.locale
-                    FROM hotel_image_categories hic
-                    WHERE hic.hotel_image_id=hi.id AND hic.locale IN (%s, 'vi', 'en')
-                    ORDER BY CASE WHEN hic.locale=%s THEN 0 WHEN hic.locale='vi' THEN 1 ELSE 2 END
-                    LIMIT 1
-                ) c ON TRUE
-                WHERE hi.hotel_id=%s
-                ORDER BY hi.sort_order NULLS LAST, hi.id
+                SELECT hi.id, hi.url, hi.uploader AS source_category, hi.sort_order,
+                       hi.is_cover, hi.trip_category_id AS category_code,
+                       COALESCE(ci_pref.name, ci_vi.name, ci_en.name) AS category_name,
+                       NULL::text AS image_title, %s AS locale
+                FROM v2.hotel_images hi
+                LEFT JOIN v2.image_category_i18n ci_pref
+                       ON ci_pref.trip_category_id = hi.trip_category_id AND ci_pref.locale = %s
+                LEFT JOIN v2.image_category_i18n ci_vi
+                       ON ci_vi.trip_category_id = hi.trip_category_id AND ci_vi.locale = 'vi'
+                LEFT JOIN v2.image_category_i18n ci_en
+                       ON ci_en.trip_category_id = hi.trip_category_id AND ci_en.locale = 'en'
+                WHERE hi.hotel_id = %s
+                ORDER BY hi.is_cover DESC, hi.sort_order NULLS LAST, hi.id
                 """,
                 (locale, locale, hotel_id),
             )
@@ -547,43 +606,55 @@ def hotel_section(hotel_id: int, section: str, locale: str) -> dict[str, Any]:
         if section == "amenities":
             cur.execute(
                 """
-                SELECT ha.id, ha.amenity_code, ha.free_type, ha.is_highlight,
-                       (to_jsonb(ha)->>'is_available')::boolean AS is_available,
-                       COALESCE(t.amenity_name, ha.amenity_name) AS amenity_name,
-                       COALESCE(t.category, ha.category) AS category,
-                       t.fee_label, t.additional_info, t.locale
-                FROM hotel_amenities ha
-                LEFT JOIN LATERAL (
-                    SELECT x.locale, x.amenity_name, x.category, x.fee_label, x.additional_info
-                    FROM hotel_amenity_translations x
-                    WHERE x.hotel_amenity_id=ha.id AND x.locale IN (%s, 'vi', 'en')
-                    ORDER BY CASE WHEN x.locale=%s THEN 0 WHEN x.locale='vi' THEN 1 ELSE 2 END
-                    LIMIT 1
-                ) t ON TRUE
-                WHERE ha.hotel_id=%s
-                ORDER BY ha.is_highlight DESC NULLS LAST, COALESCE(t.category, ha.category), ha.id
+                SELECT ha.trip_amenity_id AS id, ha.trip_amenity_id AS amenity_code,
+                       ha.fee AS free_type, ha.is_popular AS is_highlight, ha.is_available,
+                       COALESCE(ai_pref.name, ai_vi.name, ai_en.name) AS amenity_name,
+                       COALESCE(ac_pref.name, ac_vi.name, ac_en.name) AS category,
+                       d.fee_label, d.details AS additional_info, %s AS locale
+                FROM v2.hotel_amenities ha
+                JOIN v2.amenities a ON a.trip_amenity_id = ha.trip_amenity_id
+                LEFT JOIN v2.amenity_i18n ai_pref
+                       ON ai_pref.trip_amenity_id = a.trip_amenity_id AND ai_pref.locale = %s
+                LEFT JOIN v2.amenity_i18n ai_vi
+                       ON ai_vi.trip_amenity_id = a.trip_amenity_id AND ai_vi.locale = 'vi'
+                LEFT JOIN v2.amenity_i18n ai_en
+                       ON ai_en.trip_amenity_id = a.trip_amenity_id AND ai_en.locale = 'en'
+                LEFT JOIN v2.amenity_category_i18n ac_pref
+                       ON ac_pref.trip_category_id = a.trip_category_id AND ac_pref.locale = %s
+                LEFT JOIN v2.amenity_category_i18n ac_vi
+                       ON ac_vi.trip_category_id = a.trip_category_id AND ac_vi.locale = 'vi'
+                LEFT JOIN v2.amenity_category_i18n ac_en
+                       ON ac_en.trip_category_id = a.trip_category_id AND ac_en.locale = 'en'
+                LEFT JOIN v2.hotel_amenity_details d
+                       ON d.hotel_id = ha.hotel_id AND d.trip_amenity_id = ha.trip_amenity_id
+                      AND d.locale = %s
+                WHERE ha.hotel_id = %s
+                ORDER BY ha.is_popular DESC, 7, ha.trip_amenity_id
                 """,
-                (locale, locale, hotel_id),
+                (locale, locale, locale, locale, hotel_id),
             )
             return {"section": section, "items": [dict(row) for row in cur.fetchall()]}
 
         if section == "rooms":
             cur.execute(
                 """
-                SELECT r.id, r.trip_room_id, r.max_occupancy, r.area_sqm,
+                SELECT r.id, r.trip_room_id, r.max_adults AS max_occupancy, r.area_sqm,
                        r.bedroom_count, r.bathroom_count, r.bed_count,
-                       COALESCE(t.name, r.name) AS name,
-                       COALESCE(t.bed_type, r.bed_type) AS bed_type,
-                       t.view_name, t.smoking_policy, t.wifi, t.floor_label,
-                       t.extra_bed_policy, t.locale
-                FROM room_types r
-                LEFT JOIN LATERAL (
-                    SELECT x.* FROM room_type_translations x
-                    WHERE x.room_type_id=r.id AND x.locale IN (%s, 'vi', 'en')
-                    ORDER BY CASE WHEN x.locale=%s THEN 0 WHEN x.locale='vi' THEN 1 ELSE 2 END
-                    LIMIT 1
-                ) t ON TRUE
-                WHERE r.hotel_id=%s ORDER BY r.id
+                       r.smoking AS smoking_policy, r.wifi, r.extra_bed,
+                       COALESCE(t_pref.name, t_vi.name, t_en.name) AS name,
+                       COALESCE(t_pref.bed_summary, t_vi.bed_summary, t_en.bed_summary) AS bed_type,
+                       COALESCE(t_pref.view_text, t_vi.view_text, t_en.view_text) AS view_name,
+                       COALESCE(t_pref.area_text, t_vi.area_text, t_en.area_text) AS area_text,
+                       COALESCE(t_pref.guest_text, t_vi.guest_text, t_en.guest_text) AS guest_text,
+                       COALESCE(t_pref.extra_bed_text, t_vi.extra_bed_text, t_en.extra_bed_text)
+                           AS extra_bed_policy,
+                       NULL::text AS floor_label, %s AS locale
+                FROM v2.room_types r
+                LEFT JOIN v2.room_type_i18n t_pref ON t_pref.room_type_id = r.id AND t_pref.locale = %s
+                LEFT JOIN v2.room_type_i18n t_vi   ON t_vi.room_type_id = r.id AND t_vi.locale = 'vi'
+                LEFT JOIN v2.room_type_i18n t_en   ON t_en.room_type_id = r.id AND t_en.locale = 'en'
+                WHERE r.hotel_id = %s
+                ORDER BY r.sort_order NULLS LAST, r.id
                 """,
                 (locale, locale, hotel_id),
             )
@@ -596,9 +667,9 @@ def hotel_section(hotel_id: int, section: str, locale: str) -> dict[str, Any]:
             if room_ids:
                 cur.execute(
                     """
-                    SELECT room_type_id, url, category_code, sort_order
-                    FROM room_images WHERE room_type_id=ANY(%s)
-                    ORDER BY room_type_id, sort_order NULLS LAST, id
+                    SELECT room_type_id, url, NULL::int AS category_code, sort_order
+                    FROM v2.room_images WHERE room_type_id = ANY(%s)
+                    ORDER BY room_type_id, sort_order NULLS LAST, url
                     """,
                     (room_ids,),
                 )
@@ -606,94 +677,133 @@ def hotel_section(hotel_id: int, section: str, locale: str) -> dict[str, Any]:
                     room_map[row["room_type_id"]]["images"].append(dict(row))
                 cur.execute(
                     """
-                    SELECT ra.id, ra.room_type_id, ra.amenity_key, ra.amenity_code,
-                           ra.category_code, ra.is_highlight, ra.free_type,
-                           t.amenity_name, t.category_name, t.additional_info, t.locale
-                    FROM room_amenities ra
-                    LEFT JOIN LATERAL (
-                        SELECT x.locale, x.amenity_name, x.category_name, x.additional_info
-                        FROM room_amenity_translations x
-                        WHERE x.room_amenity_id=ra.id AND x.locale IN (%s, 'vi', 'en')
-                        ORDER BY CASE WHEN x.locale=%s THEN 0 WHEN x.locale='vi' THEN 1 ELSE 2 END
-                        LIMIT 1
-                    ) t ON TRUE
-                    WHERE ra.room_type_id=ANY(%s)
-                    ORDER BY ra.room_type_id, ra.is_highlight DESC NULLS LAST, ra.id
+                    SELECT ra.room_type_id, ra.trip_amenity_id AS id,
+                           ra.trip_amenity_id AS amenity_code, a.trip_category_id AS category_code,
+                           ra.is_highlight, ra.fee AS free_type,
+                           COALESCE(ai_pref.name, ai_vi.name, ai_en.name) AS amenity_name,
+                           COALESCE(ac_pref.name, ac_vi.name, ac_en.name) AS category_name,
+                           NULL::jsonb AS additional_info, %s AS locale
+                    FROM v2.room_amenities ra
+                    JOIN v2.amenities a ON a.trip_amenity_id = ra.trip_amenity_id
+                    LEFT JOIN v2.amenity_i18n ai_pref
+                           ON ai_pref.trip_amenity_id = a.trip_amenity_id AND ai_pref.locale = %s
+                    LEFT JOIN v2.amenity_i18n ai_vi
+                           ON ai_vi.trip_amenity_id = a.trip_amenity_id AND ai_vi.locale = 'vi'
+                    LEFT JOIN v2.amenity_i18n ai_en
+                           ON ai_en.trip_amenity_id = a.trip_amenity_id AND ai_en.locale = 'en'
+                    LEFT JOIN v2.amenity_category_i18n ac_pref
+                           ON ac_pref.trip_category_id = a.trip_category_id AND ac_pref.locale = %s
+                    LEFT JOIN v2.amenity_category_i18n ac_vi
+                           ON ac_vi.trip_category_id = a.trip_category_id AND ac_vi.locale = 'vi'
+                    LEFT JOIN v2.amenity_category_i18n ac_en
+                           ON ac_en.trip_category_id = a.trip_category_id AND ac_en.locale = 'en'
+                    WHERE ra.room_type_id = ANY(%s)
+                    ORDER BY ra.room_type_id, ra.is_highlight DESC, ra.trip_amenity_id
                     """,
-                    (locale, locale, room_ids),
+                    (locale, locale, locale, room_ids),
                 )
                 for row in cur.fetchall():
                     room_map[row["room_type_id"]]["amenities"].append(dict(row))
             return {"section": section, "items": rooms}
 
         if section == "prices":
+            # Mỗi dòng là một gói giá của một loại phòng, kèm giá từng tiền tệ.
             cur.execute(
                 """
-                SELECT p.id, p.room_type_id, COALESCE(t.name, r.name) AS room_name,
-                       p.check_in, p.check_out, p.price, p.currency, p.tax_included,
-                       p.language, p.price_type, p.captured_date, p.captured_at
-                FROM hotel_prices p
-                LEFT JOIN room_types r ON r.id=p.room_type_id
-                LEFT JOIN LATERAL (
-                    SELECT x.name FROM room_type_translations x
-                    WHERE x.room_type_id=r.id AND x.locale IN (%s, 'vi', 'en')
-                    ORDER BY CASE WHEN x.locale=%s THEN 0 WHEN x.locale='vi' THEN 1 ELSE 2 END
-                    LIMIT 1
-                ) t ON TRUE
-                WHERE p.hotel_id=%s
-                ORDER BY p.captured_date DESC, p.currency, p.price NULLS LAST
+                SELECT o.id, o.room_type_id,
+                       COALESCE(t_pref.name, t_vi.name, t_en.name) AS room_name,
+                       o.check_in, o.check_out, p.price_per_night AS price, p.currency,
+                       p.total_price, p.taxes_fees,
+                       (p.taxes_fees IS NOT NULL) AS tax_included,
+                       %s AS language,
+                       COALESCE(oi_pref.title, oi_vi.title, oi_en.title) AS price_type,
+                       o.captured_date, p.captured_at,
+                       o.breakfast_included, o.free_cancellation, o.is_sold_out
+                FROM v2.room_offers o
+                JOIN v2.room_types r ON r.id = o.room_type_id
+                JOIN v2.room_offer_prices p ON p.offer_id = o.id
+                LEFT JOIN v2.room_type_i18n t_pref ON t_pref.room_type_id = r.id AND t_pref.locale = %s
+                LEFT JOIN v2.room_type_i18n t_vi   ON t_vi.room_type_id = r.id AND t_vi.locale = 'vi'
+                LEFT JOIN v2.room_type_i18n t_en   ON t_en.room_type_id = r.id AND t_en.locale = 'en'
+                LEFT JOIN v2.room_offer_i18n oi_pref ON oi_pref.offer_id = o.id AND oi_pref.locale = %s
+                LEFT JOIN v2.room_offer_i18n oi_vi   ON oi_vi.offer_id = o.id AND oi_vi.locale = 'vi'
+                LEFT JOIN v2.room_offer_i18n oi_en   ON oi_en.offer_id = o.id AND oi_en.locale = 'en'
+                WHERE r.hotel_id = %s
+                ORDER BY o.captured_date DESC, p.currency, p.price_per_night NULLS LAST
                 """,
-                (locale, locale, hotel_id),
+                (locale, locale, locale, hotel_id),
             )
             return {"section": section, "items": [dict(row) for row in cur.fetchall()]}
 
         if section == "policies":
             cur.execute(
                 """
-                SELECT p.id, p.policy_code, p.sort_order, t.locale, t.title, t.description
-                FROM hotel_policies p
-                LEFT JOIN LATERAL (
-                    SELECT x.locale, x.title, x.description
-                    FROM hotel_policy_translations x
-                    WHERE x.hotel_policy_id=p.id AND x.locale IN (%s, 'vi', 'en')
-                    ORDER BY CASE WHEN x.locale=%s THEN 0 WHEN x.locale='vi' THEN 1 ELSE 2 END
-                    LIMIT 1
-                ) t ON TRUE
-                WHERE p.hotel_id=%s ORDER BY p.sort_order, p.id
+                SELECT ps.section_code AS policy_code, ps.sort_order, ps.locale, ps.title,
+                       string_agg(
+                           CASE WHEN COALESCE(pl.label, '') = '' THEN pl.text
+                                ELSE pl.label || ': ' || pl.text END,
+                           E'\n' ORDER BY pl.line_no) AS description
+                FROM v2.hotel_policy_sections ps
+                LEFT JOIN v2.hotel_policy_lines pl
+                       ON pl.hotel_id = ps.hotel_id AND pl.locale = ps.locale
+                      AND pl.section_code = ps.section_code
+                WHERE ps.hotel_id = %s AND ps.locale = %s
+                GROUP BY ps.section_code, ps.sort_order, ps.locale, ps.title
+                ORDER BY ps.sort_order, ps.section_code
                 """,
-                (locale, locale, hotel_id),
+                (hotel_id, locale),
             )
-            return {"section": section, "items": [dict(row) for row in cur.fetchall()]}
+            items = [dict(row) for row in cur.fetchall()]
+            for index, row in enumerate(items):
+                row["id"] = index + 1
+            return {"section": section, "items": items}
 
         if section == "nearby":
             cur.execute(
                 """
-                SELECT p.id, p.trip_poi_id, p.category_code, p.poi_type,
-                       p.latitude, p.longitude, p.distance_km, p.arrival_type, p.sort_order,
-                       t.locale, t.name, t.category_name, t.distance_text, t.description, t.tags
-                FROM hotel_nearby_places p
-                LEFT JOIN LATERAL (
-                    SELECT x.locale, x.name, x.category_name, x.distance_text,
-                           x.description, x.tags
-                    FROM hotel_nearby_place_translations x
-                    WHERE x.nearby_place_id=p.id AND x.locale IN (%s, 'vi', 'en')
-                    ORDER BY CASE WHEN x.locale=%s THEN 0 WHEN x.locale='vi' THEN 1 ELSE 2 END
-                    LIMIT 1
-                ) t ON TRUE
-                WHERE p.hotel_id=%s ORDER BY p.category_code, p.sort_order, p.id
+                SELECT np.place_id AS id, pl.trip_poi_id, np.group_code AS category_code,
+                       pl.poi_type, pl.latitude, pl.longitude, np.distance_km,
+                       np.travel_mode AS arrival_type, np.sort_order,
+                       %s AS locale,
+                       COALESCE(pi_pref.name, pi_vi.name, pi_en.name) AS name,
+                       npi.group_name AS category_name, npi.distance_text,
+                       COALESCE(pi_pref.kind, pi_vi.kind, pi_en.kind) AS description,
+                       NULL::jsonb AS tags
+                FROM v2.hotel_nearby_places np
+                JOIN v2.places pl ON pl.id = np.place_id
+                LEFT JOIN v2.place_i18n pi_pref ON pi_pref.place_id = pl.id AND pi_pref.locale = %s
+                LEFT JOIN v2.place_i18n pi_vi   ON pi_vi.place_id = pl.id AND pi_vi.locale = 'vi'
+                LEFT JOIN v2.place_i18n pi_en   ON pi_en.place_id = pl.id AND pi_en.locale = 'en'
+                LEFT JOIN v2.hotel_nearby_place_i18n npi
+                       ON npi.hotel_id = np.hotel_id AND npi.place_id = np.place_id
+                      AND npi.locale = %s
+                WHERE np.hotel_id = %s
+                ORDER BY np.group_code, np.sort_order, np.place_id
                 """,
-                (locale, locale, hotel_id),
+                (locale, locale, locale, hotel_id),
             )
             return {"section": section, "items": [dict(row) for row in cur.fetchall()]}
 
-        cur.execute("SELECT raw_json FROM hotels WHERE id=%s", (hotel_id,))
-        raw_hotel = cur.fetchone()["raw_json"]
+        # raw: v2 không lưu raw_json trong DB (raw nằm ở output/details/raw),
+        # nên trả về bản ghi đã chuẩn hóa để vẫn xem được cấu trúc.
         cur.execute(
-            "SELECT locale, raw_json FROM hotel_translations WHERE hotel_id=%s ORDER BY locale",
+            """
+            SELECT to_jsonb(h) AS hotel,
+                   (SELECT jsonb_agg(to_jsonb(i)) FROM v2.hotel_i18n i WHERE i.hotel_id = h.id)
+                       AS translations,
+                   (SELECT to_jsonb(p) FROM v2.hotel_policies p WHERE p.hotel_id = h.id)
+                       AS policies
+            FROM v2.hotels h WHERE h.id = %s
+            """,
             (hotel_id,),
         )
-        translations = [dict(row) for row in cur.fetchall()]
-        return {"section": section, "hotel": raw_hotel, "translations": translations}
+        row = cur.fetchone()
+        return {
+            "section": section,
+            "hotel": row["hotel"],
+            "translations": row["translations"] or [],
+            "policies": row["policies"],
+        }
 
 
 class DataViewerHandler(BaseHTTPRequestHandler):
@@ -771,6 +881,9 @@ class DataViewerHandler(BaseHTTPRequestHandler):
             if path == "/api/schema":
                 schema = load_schema(force=_query_value(query, "refresh") == "1")
                 self.send_json({"tables": schema["tables"]})
+                return
+            if path == "/api/cities":
+                self.send_json(cities())
                 return
             if path == "/api/hotels":
                 self.send_json(hotel_rows(query))

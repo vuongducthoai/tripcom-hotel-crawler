@@ -1,0 +1,355 @@
+/* Trang chi tiết dựng theo bố cục trang khách sạn của Trip.com để đối chiếu
+   dữ liệu crawl cho nhanh: thư viện ảnh → tên + điểm → thông tin nhanh →
+   mô tả → phòng & giá → tiện nghi → chính sách → vị trí.
+   Giao diện tự làm, không dùng logo hay nhận diện thương hiệu của Trip.com. */
+.tp { max-width: 1180px; margin: 0 auto; padding: 0 16px 64px; color: #1f2329; }
+.tp a { color: #0064ff; }
+
+/* ---------- thư viện ảnh ---------- */
+.tp-gallery { display: grid; grid-template-columns: 2fr 1fr 1fr; grid-template-rows: 150px 150px;
+  gap: 6px; border-radius: 12px; overflow: hidden; margin-bottom: 20px; background: #eef1f5; }
+.tp-gallery figure { margin: 0; position: relative; overflow: hidden; background: #e6eaf0; }
+.tp-gallery figure:first-child { grid-row: span 2; }
+.tp-gallery img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tp-gallery .more { position: absolute; inset: 0; display: grid; place-items: center;
+  background: rgba(20,26,36,.62); color: #fff; font-weight: 600; font-size: 15px; }
+.tp-gallery .cap { position: absolute; left: 6px; bottom: 6px; background: rgba(20,26,36,.66);
+  color: #fff; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+
+/* ---------- tên + điểm ---------- */
+.tp-head { display: flex; gap: 24px; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap; margin-bottom: 16px; }
+.tp-head h1 { font-size: 27px; line-height: 1.25; margin: 0 0 6px; font-weight: 700; }
+.tp-stars { color: #ff9500; font-size: 15px; letter-spacing: 1px; }
+.tp-localname { color: #6b7280; font-size: 14px; margin: 2px 0 6px; }
+.tp-addr { color: #4b5563; font-size: 14px; margin: 0; }
+.tp-addr .coord { color: #9aa3af; margin-left: 6px; font-size: 12.5px; }
+.tp-score { display: flex; align-items: center; gap: 10px; }
+.tp-score .num { background: #0064ff; color: #fff; font-size: 22px; font-weight: 700;
+  padding: 8px 12px; border-radius: 10px 10px 10px 2px; }
+.tp-score .txt b { display: block; font-size: 14px; }
+.tp-score .txt span { color: #6b7280; font-size: 13px; }
+
+/* ---------- thông tin nhanh ---------- */
+.tp-facts { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 26px; }
+.tp-facts div { background: #f4f6f9; border-radius: 8px; padding: 8px 14px; font-size: 13.5px; }
+.tp-facts b { color: #1f2329; }
+
+/* ---------- thanh mục lục dính ---------- */
+.tp-nav { position: sticky; top: 0; z-index: 20; background: #fff; border-bottom: 1px solid #e5e8ee;
+  display: flex; gap: 4px; margin-bottom: 24px; overflow-x: auto; }
+.tp-nav button { border: 0; background: none; padding: 13px 16px; font-size: 14.5px; font-weight: 600;
+  color: #5b636e; cursor: pointer; white-space: nowrap; border-bottom: 2px solid transparent; }
+.tp-nav button.active { color: #0064ff; border-bottom-color: #0064ff; }
+
+/* ---------- khối chung ---------- */
+.tp-block { margin-bottom: 34px; scroll-margin-top: 58px; }
+.tp-block > h2 { font-size: 20px; font-weight: 700; margin: 0 0 14px; }
+.tp-empty { color: #9aa3af; font-size: 14px; padding: 12px 0; }
+
+/* ---------- mô tả ---------- */
+.tp-about { display: grid; grid-template-columns: 190px 1fr; gap: 20px; background: #fff;
+  border: 1px solid #e9ecf1; border-radius: 12px; padding: 20px; }
+.tp-about h2 { margin: 0; font-size: 17px; }
+.tp-about .body { font-size: 14px; line-height: 1.75; color: #374151; white-space: pre-line; }
+.tp-about .labels { color: #6b7280; font-size: 13px; margin-bottom: 10px; }
+
+/* ---------- phòng & giá ---------- */
+.tp-room { border: 1px solid #e9ecf1; border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+.tp-room-top { display: grid; grid-template-columns: 210px 1fr; gap: 16px; padding: 16px; }
+.tp-room-top img { width: 100%; height: 140px; object-fit: cover; border-radius: 8px; }
+.tp-room-noimg { height: 140px; border-radius: 8px; background: #f0f2f6; display: grid;
+  place-items: center; color: #9aa3af; font-size: 13px; }
+.tp-room h3 { margin: 0 0 8px; font-size: 16.5px; }
+.tp-room-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.tp-room-meta span { background: #f4f6f9; border-radius: 6px; padding: 3px 9px; font-size: 12.5px; color: #4b5563; }
+.tp-room-am { font-size: 12.5px; color: #6b7280; line-height: 1.7; }
+.tp-offers { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.tp-offers th { background: #f7f9fc; text-align: left; padding: 9px 14px; font-weight: 600;
+  color: #5b636e; border-top: 1px solid #e9ecf1; }
+.tp-offers td { padding: 11px 14px; border-top: 1px solid #f0f2f6; vertical-align: middle; }
+.tp-offers .price { text-align: right; font-weight: 700; color: #ff5b26; white-space: nowrap; }
+.tp-offers .price small { display: block; font-weight: 400; color: #9aa3af; font-size: 11.5px; }
+.tp-tag { display: inline-block; border-radius: 4px; padding: 1px 7px; font-size: 11.5px; margin-right: 4px; }
+.tp-tag.ok { background: #e7f7ee; color: #12864a; }
+.tp-tag.no { background: #f3f4f6; color: #6b7280; }
+
+/* ---------- tiện nghi ---------- */
+.tp-am-group { margin-bottom: 18px; }
+.tp-am-group h3 { font-size: 14.5px; margin: 0 0 8px; color: #374151; }
+.tp-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.tp-chip { background: #f4f6f9; border-radius: 16px; padding: 5px 12px; font-size: 13px; color: #374151; }
+.tp-chip.hi { background: #eaf2ff; color: #0053d6; font-weight: 600; }
+.tp-chip.off { color: #9aa3af; text-decoration: line-through; }
+.tp-chip em { font-style: normal; color: #12864a; margin-left: 5px; font-size: 11.5px; }
+
+/* ---------- chính sách ---------- */
+.tp-policy { display: grid; grid-template-columns: 190px 1fr; gap: 16px; padding: 16px 0;
+  border-top: 1px solid #f0f2f6; }
+.tp-policy:first-child { border-top: 0; }
+.tp-policy h3 { margin: 0; font-size: 14.5px; color: #1f2329; }
+.tp-policy .code { display: block; color: #9aa3af; font-size: 11.5px; font-weight: 400; margin-top: 3px; }
+.tp-policy .body { font-size: 13.5px; line-height: 1.8; color: #374151; white-space: pre-line; }
+
+/* ---------- vị trí ---------- */
+.tp-loc { display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px; }
+.tp-loc h3 { font-size: 14.5px; margin: 0 0 10px; }
+.tp-loc ul { list-style: none; margin: 0; padding: 0; }
+.tp-loc li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 13.5px; }
+.tp-loc li span:first-child { color: #1f2329; }
+.tp-loc li .km { color: #0064ff; white-space: nowrap; }
+.tp-loc li .geo { display: block; color: #c0c6ce; font-size: 11px; }
+
+@media (max-width: 900px) {
+  .tp-gallery { grid-template-columns: 1fr 1fr; grid-template-rows: 140px 140px; }
+  .tp-about, .tp-policy, .tp-room-top { grid-template-columns: 1fr; }
+  .tp-loc { grid-template-columns: 1fr; }
+}
+
+/* -------------------------------------------------------------------------
+   Detail v2 — nhịp bố cục gần trang đặt phòng: thông tin cô đọng, gallery lớn,
+   khối giá nổi bật và inventory phòng dạng bảng. Các rule này cố ý đặt cuối
+   file để giữ tương thích với markup cũ trong lúc dữ liệu đang được hoàn thiện.
+--------------------------------------------------------------------------- */
+.tp {
+  --tp-blue: #287dfa;
+  --tp-blue-dark: #0f63d8;
+  --tp-ink: #172033;
+  --tp-muted: #697386;
+  --tp-line: #e5e9f0;
+  --tp-soft: #f5f7fa;
+  --tp-orange: #ff5b24;
+  max-width: 1200px;
+  color: var(--tp-ink);
+  padding-top: 6px;
+}
+.tp h1, .tp h2, .tp h3 { color: var(--tp-ink); }
+.tp-head { align-items: center; margin: 12px 0 16px; flex-wrap: nowrap; }
+.tp-head-main { min-width: 0; }
+.tp-kicker { color: var(--tp-blue-dark); font-size: 12px; font-weight: 700; letter-spacing: .025em; margin-bottom: 5px; }
+.tp-head h1 { font-size: 26px; letter-spacing: -.02em; margin-bottom: 5px; }
+.tp-stars { vertical-align: 3px; font-size: 13px; }
+.tp-localname { margin: 0 0 4px; }
+.tp-addr { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; line-height: 1.55; }
+.tp-pin { color: var(--tp-blue); font-size: 8px; margin-right: 3px; }
+.tp-score { flex: 0 0 auto; flex-direction: row; text-align: right; }
+.tp-score .num { min-width: 58px; box-sizing: border-box; border-radius: 9px 9px 9px 2px; font-size: 21px; padding: 9px 8px; text-align: center; }
+.tp-score .num small { font-size: 11px; font-weight: 500; opacity: .82; }
+.tp-score .txt b { font-size: 15px; }
+
+.tp-gallery { grid-template-columns: 2fr 1fr 1fr; grid-template-rows: 164px 164px; gap: 5px; border-radius: 8px; margin-bottom: 14px; position: relative; }
+.tp-gallery figure:first-child, .tp-gallery figure.main { grid-row: span 2; }
+.tp-gallery figure::after { content: ""; position: absolute; inset: 0; background: rgba(10, 22, 45, 0); transition: background .2s; pointer-events: none; }
+.tp-gallery figure:hover::after { background: rgba(10, 22, 45, .09); }
+.tp-gallery .cap { left: 8px; bottom: 8px; background: rgba(12, 25, 49, .72); }
+.tp-gallery-more { position: absolute; right: 12px; bottom: 12px; z-index: 2; border: 1px solid rgba(0,0,0,.14); background: rgba(255,255,255,.96); color: var(--tp-ink); border-radius: 6px; padding: 8px 12px; font-weight: 650; cursor: pointer; box-shadow: 0 2px 10px rgba(24,38,63,.12); }
+
+.tp-nav { top: 0; z-index: 30; margin: 0 0 20px; border: 1px solid var(--tp-line); border-width: 1px 0; box-shadow: 0 4px 10px rgba(27,39,59,.035); }
+.tp-nav button { padding: 14px 15px 12px; font-size: 14px; }
+.tp-nav button.active { color: var(--tp-blue-dark); border-bottom-width: 3px; }
+.tp-block { scroll-margin-top: 62px; margin-bottom: 28px; }
+.tp-surface { border: 1px solid var(--tp-line); border-radius: 10px; background: #fff; padding: 22px; }
+.tp-surface > h2 { font-size: 21px; margin: 0 0 18px; }
+.tp-overview { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 16px; }
+.tp-overview-main { min-width: 0; border: 1px solid var(--tp-line); border-radius: 10px; background: #fff; overflow: hidden; }
+
+.tp-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin: 0; border-bottom: 1px solid var(--tp-line); background: var(--tp-soft); }
+.tp-facts div { min-width: 0; border-radius: 0; background: transparent; border-right: 1px solid var(--tp-line); padding: 11px 13px; color: var(--tp-muted); font-size: 12px; }
+.tp-facts div:nth-child(4n) { border-right: 0; }
+.tp-facts b { display: block; margin-top: 3px; color: var(--tp-ink); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-about { display: block; border: 0; border-radius: 0; padding: 20px; }
+.tp-about h2 { font-size: 19px; margin-bottom: 8px; }
+.tp-about .labels { display: inline-block; color: var(--tp-blue-dark); background: #eef5ff; border-radius: 5px; padding: 5px 8px; margin-bottom: 12px; }
+.tp-about .body { line-height: 1.7; }
+
+.tp-booking-card { position: sticky; top: 62px; border: 1px solid #d9e5f8; border-radius: 10px; background: linear-gradient(180deg, #f3f8ff 0, #fff 58%); padding: 18px; box-shadow: 0 5px 16px rgba(32, 93, 172, .08); }
+.tp-booking-label { color: var(--tp-muted); font-size: 12px; }
+.tp-booking-price { color: var(--tp-orange); font-size: 24px; line-height: 1.25; font-weight: 750; margin: 5px 0; }
+.tp-booking-price small { display: block; color: var(--tp-muted); font-size: 11px; font-weight: 500; }
+.tp-booking-date, .tp-booking-missing { min-height: 34px; color: #505b6d; font-size: 12px; margin: 8px 0 12px; }
+.tp-primary { width: 100%; border: 0; border-radius: 6px; background: var(--tp-blue); color: #fff; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+.tp-primary:hover { background: var(--tp-blue-dark); }
+.tp-source-link { display: block; text-align: center; margin-top: 11px; font-size: 13px; font-weight: 650; text-decoration: none; }
+.tp-booking-card p { color: #929aaa; font-size: 10.5px; line-height: 1.45; margin: 12px 0 0; }
+
+.tp-section-title { display: flex; justify-content: space-between; align-items: end; margin: 0 0 12px; }
+.tp-section-title span { color: var(--tp-blue-dark); font-size: 12px; font-weight: 700; }
+.tp-section-title h2 { font-size: 23px; margin: 2px 0 0; }
+.tp-section-title > small { color: var(--tp-muted); }
+
+.tp-room { display: grid; grid-template-columns: 280px minmax(0, 1fr); align-items: stretch; border-color: #dfe4eb; border-radius: 8px; background: #fff; margin-bottom: 12px; }
+.tp-room-info { padding: 14px; border-right: 1px solid var(--tp-line); background: #fbfcfe; }
+.tp-room-info > div:first-child { position: relative; }
+.tp-room-info img { width: 100%; height: 148px; object-fit: cover; border-radius: 6px; display: block; }
+.tp-room-noimg { height: 148px; }
+.tp-room-photo-count { position: absolute; right: 7px; bottom: 7px; border-radius: 4px; padding: 4px 7px; color: #fff; background: rgba(19,31,53,.76); font-size: 11px; }
+.tp-room h3 { font-size: 17px; margin: 12px 0 9px; }
+.tp-room-meta { display: grid; gap: 4px; margin: 0 0 10px; }
+.tp-room-meta span { padding: 0; background: transparent; color: #4e5868; font-size: 12px; }
+.tp-room-meta span::before { content: "·"; color: var(--tp-blue); font-weight: 800; margin-right: 6px; }
+.tp-room-am { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; color: #5c6677; font-size: 11.5px; line-height: 1.45; }
+.tp-room-am span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-room-am span::first-letter { color: #1c9a61; }
+.tp-room-am .more-am { color: var(--tp-blue-dark); }
+.tp-room-am.muted { display: block; color: #929aaa; }
+.tp-room-rates { min-width: 0; overflow-x: auto; }
+.tp-offers { height: 100%; min-width: 680px; }
+.tp-offers th { border-top: 0; padding: 10px 12px; background: #f7f9fc; font-size: 12px; }
+.tp-offers th.right { text-align: right; }
+.tp-offers td { padding: 14px 12px; vertical-align: top; }
+.tp-offers td b { display: block; margin-bottom: 5px; }
+.tp-offers td > small { display: block; color: #929aaa; font-size: 10.5px; line-height: 1.45; }
+.tp-guests { color: #4c586b; letter-spacing: -2px; font-size: 9px; display: block; margin: 2px 0 7px; }
+.tp-tag { display: block; width: max-content; margin: 0 0 5px; padding: 2px 0; background: transparent !important; }
+.tp-tag.ok { color: #158459; }
+.tp-tag.ok::before { content: "✓ "; }
+.tp-tag.no { color: #7d8696; }
+.tp-tag.sold { color: #c64040; font-weight: 650; }
+.tp-offers .price { color: var(--tp-orange); font-size: 16px; }
+.tp-offers .action { width: 68px; text-align: right; }
+.tp-offers .action a, .tp-offers .action button { display: inline-block; box-sizing: border-box; border: 0; border-radius: 5px; padding: 8px 13px; background: var(--tp-blue); color: #fff; font-size: 12px; font-weight: 700; text-decoration: none; }
+.tp-offers .action button:disabled { background: #c8ced8; }
+.tp-no-rate { display: flex; min-height: 120px; align-items: center; justify-content: center; flex-direction: column; gap: 8px; color: var(--tp-muted); font-size: 13px; }
+.tp-no-rate a { font-weight: 650; text-decoration: none; }
+
+.tp-am-group { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 16px; padding: 15px 0; margin: 0; border-top: 1px solid #eef1f5; }
+.tp-am-group:first-of-type { border-top: 0; padding-top: 0; }
+.tp-am-group h3 { margin: 2px 0 0; font-size: 14px; }
+.tp-chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 18px; }
+.tp-chip { display: flex; align-items: baseline; gap: 7px; padding: 0; background: transparent !important; border-radius: 0; color: #424c5d; font-size: 13px; }
+.tp-chip i { flex: 0 0 auto; color: #15915e; font-style: normal; font-weight: 800; }
+.tp-chip.hi { color: var(--tp-blue-dark); font-weight: 650; }
+.tp-chip.off i { color: #aeb5c0; }
+.tp-chip em { margin-left: auto; }
+
+.tp-policy { grid-template-columns: 220px minmax(0, 1fr); padding: 17px 0; }
+.tp-policy h3 { font-size: 14px; }
+.tp-policy .body { line-height: 1.65; color: #4d5768; }
+.tp-loc { gap: 34px; }
+.tp-loc > div { min-width: 0; }
+.tp-loc li { border-bottom: 1px dashed #edf0f4; }
+
+/* Nearby places: compact Trip.com-style cards. */
+.tp .tp-loc {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 14px;
+}
+.tp-loc-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--tp-line);
+  border-radius: 9px;
+  background: #fff;
+  padding: 15px 16px 10px;
+}
+.tp-loc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-bottom: 9px;
+  border-bottom: 1px solid #edf0f4;
+}
+.tp-loc-head > div { min-width: 0; }
+.tp-loc-icon {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef5ff;
+  color: var(--tp-blue-dark);
+  font-size: 16px;
+}
+.tp .tp-loc h3 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-loc-head p {
+  margin: 3px 0 0;
+  color: var(--tp-muted);
+  font-size: 11px;
+}
+.tp .tp-loc li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 0;
+  border-bottom: 1px dashed #edf0f4;
+  font-size: 13px;
+}
+.tp .tp-loc li:last-child { border-bottom: 0; }
+.tp-place { min-width: 0; }
+.tp-place b,
+.tp-place .geo {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-place b { color: var(--tp-ink); font-size: 13px; font-weight: 600; }
+.tp .tp-place .geo { margin-top: 2px; color: #9099a8; font-size: 10.5px; }
+.tp .tp-loc li .km {
+  justify-self: end;
+  border-radius: 5px;
+  background: #f3f6fa;
+  color: #536174;
+  padding: 3px 6px;
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.tp-loc-details { margin-top: 1px; border-top: 1px solid #edf0f4; }
+.tp-loc-details summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 10px 2px 3px;
+  color: var(--tp-blue-dark);
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+}
+.tp-loc-details summary::-webkit-details-marker { display: none; }
+.tp-loc-details summary span { transition: transform .18s ease; }
+.tp-loc-details[open] summary span { transform: rotate(180deg); }
+
+@media (max-width: 980px) {
+  .tp-overview { grid-template-columns: 1fr; }
+  .tp-booking-card { position: static; }
+  .tp-room { grid-template-columns: 240px minmax(0, 1fr); }
+  .tp-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .tp-facts div:nth-child(4n) { border-right: 1px solid var(--tp-line); }
+  .tp-facts div:nth-child(3n) { border-right: 0; }
+  .tp-chips { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tp .tp-loc { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 700px) {
+  .tp { padding-inline: 12px; }
+  .tp-head { align-items: flex-start; }
+  .tp-head h1 { font-size: 21px; }
+  .tp-score .txt { display: none; }
+  .tp-gallery { grid-template-columns: 2fr 1fr; grid-template-rows: 112px 112px; }
+  .tp-gallery figure:nth-of-type(n+4) { display: none; }
+  .tp-room { grid-template-columns: 1fr; }
+  .tp-room-info { border-right: 0; border-bottom: 1px solid var(--tp-line); }
+  .tp-room-info img, .tp-room-noimg { height: 190px; }
+  .tp-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tp-facts div:nth-child(3n) { border-right: 1px solid var(--tp-line); }
+  .tp-facts div:nth-child(2n) { border-right: 0; }
+  .tp-am-group, .tp-policy { grid-template-columns: 1fr; }
+  .tp-chips { grid-template-columns: 1fr; }
+  .tp .tp-loc { grid-template-columns: 1fr; }
+  .tp-surface { padding: 17px; }
+  .tp-section-title { align-items: start; flex-direction: column; gap: 4px; }
+}

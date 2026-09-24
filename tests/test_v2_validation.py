@@ -148,6 +148,20 @@ class Layer1Response(unittest.TestCase):
 
 
 class Layer2Records(unittest.TestCase):
+    def test_static_ssr_rooms_are_loaded_without_offers(self):
+        dump = make_dump()
+        room_data = copy.deepcopy(dump["responses"][0]["response"]["data"])
+        room_data["saleRoomMap"] = {}
+        dump["responses"] = [p for p in dump["responses"]
+                             if p["url"] not in (ROOM, POP)]
+        dump["responses"].append({"url": "embedded:hotel-rooms",
+                                  "response": room_data})
+        bundle, issues = run(dump)
+        self.assertEqual(len(bundle.rooms), 1)
+        self.assertEqual(bundle.offers, [])
+        self.assertIn("no_room_api", rules_of(issues))
+        self.assertIn("rooms_without_offers", rules_of(issues))
+
     def test_auto_fixes(self):
         bundle, issues = run(make_dump())
         room = bundle.rooms[0]

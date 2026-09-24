@@ -116,6 +116,17 @@ def api_data(dump: dict, name: str) -> dict:
     return (value.get("data") or {}) if isinstance(value, dict) else {}
 
 
+def static_room_data(dump: dict) -> dict:
+    """Lấy cấu trúc phòng tĩnh từ SSR khi không có API giá."""
+    for packet in dump.get("responses") or []:
+        if packet.get("url") != "embedded:hotel-rooms":
+            continue
+        value = packet.get("response")
+        if isinstance(value, dict) and (value.get("physicRoomMap") or value.get("roomPopInfo")):
+            return value
+    return {}
+
+
 ANTIBOT_XOR_KEY = 0x0A
 
 
@@ -756,20 +767,26 @@ def _wifi(info: dict) -> str | None:
 
 
 def extract_rooms(b: Bundle, dump: dict, c: Cleaner, issues: Issues) -> None:
-    data = api_data(dump, ROOM_API)
+    live_data = api_data(dump, ROOM_API)
+    data = live_data or static_room_data(dump)
     normalized = dump.get("normalized") or {}
     # Chỉ tin cờ của crawler: isRoomListSoldOut của Trip.com có thể True
     # ngay cả khi vẫn còn gói giá bán được (gặp thật ở hotel 134013415).
     b.rooms_sold_out = bool(normalized.get("rooms_sold_out"))
     physic = data.get("physicRoomMap") or {}
     sales = data.get("saleRoomMap") or {}
+    if not live_data:
+        issues.add("no_room_api", "hotel",
+                   detail="có thể vẫn có loại phòng tĩnh từ SSR, nhưng không có giá/offers")
     if not physic:
-        issues.add("rooms_sold_out" if b.rooms_sold_out else "no_room_api", "hotel")
+        if b.rooms_sold_out:
+            issues.add("rooms_sold_out", "hotel")
         return
 
     # popup: Trip.com có lúc khóa theo mã phòng, có lúc theo khóa gói "id_roomCode"
     pops_by_room: dict[str, dict] = {}
-    for key, pop in (api_data(dump, POP_API).get("roomPopInfo") or {}).items():
+    popup_data = api_data(dump, POP_API) or data
+    for key, pop in (popup_data.get("roomPopInfo") or {}).items():
         room_id = key if key in physic else str((sales.get(key) or {}).get("physicalRoomId") or "")
         if room_id and room_id not in pops_by_room:
             pops_by_room[room_id] = pop

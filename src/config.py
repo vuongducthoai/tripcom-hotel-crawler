@@ -86,6 +86,25 @@ def browser_proxy() -> dict[str, str] | None:
         proxy.update(username=username, password=password)
     return proxy
 
+
+def httpx_proxy_url() -> str | None:
+    """Return the configured proxy as an authenticated URL for httpx."""
+    proxy = browser_proxy()
+    if not proxy:
+        return None
+    server = proxy["server"]
+    username = proxy.get("username")
+    if not username:
+        return server
+
+    from urllib.parse import quote, urlsplit, urlunsplit
+
+    parsed = urlsplit(server)
+    password = proxy.get("password", "")
+    auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
+    return urlunsplit((parsed.scheme, auth + parsed.netloc, parsed.path,
+                       parsed.query, parsed.fragment))
+
 # ---------------------------------------------------------------- tốc độ
 # Giữ chậm. Bị block một lần là mất cả buổi để gỡ.
 MIN_DELAY = float(os.getenv("MIN_DELAY", "1.5"))

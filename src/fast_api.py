@@ -115,7 +115,8 @@ def apply_swaps(value: Any, swaps: list[tuple[Any, Any]]) -> Any:
 
 
 def payload_for(mau: dict, ten_api: str, hotel_id: str, checkin: str,
-                checkout: str, context: dict) -> tuple[str, dict, dict]:
+                checkout: str, context: dict,
+                visitor_id: str | None = None) -> tuple[str, dict, dict]:
     """Trả về (url, headers, body) đã thay số liệu cho khách sạn cần cào."""
     api = mau["apis"][ten_api]
     swaps = build_swaps(mau, hotel_id, checkin, checkout, context)
@@ -124,7 +125,14 @@ def payload_for(mau: dict, ten_api: str, hotel_id: str, checkin: str,
     for cu, moi in swaps:
         if isinstance(cu, str):
             url = url.replace(cu, str(moi))
-    return url, dict(api.get("headers") or {}), apply_swaps(copy.deepcopy(body), swaps)
+    body = apply_swaps(copy.deepcopy(body), swaps)
+    # cid/vid identify the current browser visitor. Replaying the values captured
+    # in an old template makes every request look tied to that stale session,
+    # even after cookies or the proxy IP have changed.
+    if visitor_id and isinstance(body.get("head"), dict):
+        body["head"]["cid"] = visitor_id
+        body["head"]["vid"] = visitor_id
+    return url, dict(api.get("headers") or {}), body
 
 
 def load_templates(locale: str, currency: str) -> dict | None:

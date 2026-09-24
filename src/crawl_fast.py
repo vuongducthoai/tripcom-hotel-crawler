@@ -7,8 +7,10 @@ Trang chi tiết Trip.com là Next.js render sẵn ở server, nên phần lớn
 dạng flight data `self.__next_f.push(...)` — tải HTML rồi bóc ra là đủ, không
 cần trình duyệt.
 
-Phần KHÔNG có trong HTML: danh sách phòng, giá và địa điểm gần đây — chúng
-đến từ 3 API XHR. Muốn lấy thì cần mẫu request, xem `--build-templates`.
+HTML SSR có thể chứa cấu trúc loại phòng (`physicRoomMap`,
+`roomPopInfo`) nhưng không đảm bảo có giá/gói bán. Mặc định crawler chỉ
+lấy SSR để không đụng endpoint phòng nhạy cảm. Muốn enrichment giá,
+gói phòng và nearby bằng mẫu XHR thì thêm `--enrich-apis`.
 
 Dùng lại phiên đăng nhập sẵn có (cookie xuất từ browser_profile). Không giả
 mạo vân tay TLS, không xoay proxy: gọi chậm, một IP, gặp chặn thì dừng.
@@ -32,6 +34,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import config                                   # noqa: E402
 import raw_store                                # noqa: E402
@@ -54,6 +58,8 @@ JSON_LD = re.compile(
 META_DESC = re.compile(
     r'<meta[^>]+(?:name=["\']description["\']|property=["\']og:description["\'])'
     r'[^>]+content=["\'](.*?)["\']', re.S | re.I)
+SCRIPT = re.compile(r'<script\b[^>]*>(.*?)</script>', re.S | re.I)
+NEXT_PUSH = re.compile(r'(?:self|window)\.__next_f\.push\(\s*')
 
 
 # ----------------------------------------------------------------- bóc từ HTML
@@ -91,6 +97,54 @@ def json_ld_blocks(html: str) -> list[dict]:
 def meta_description(html: str) -> str | None:
     found = META_DESC.search(html)
     return found.group(1).strip() if found else None
+
+
+def next_f_chunks(html: str) -> list[object]:
+    """Giải các object JSON trong `self.__next_f.push` của Next.js."""
+    chunks: list[object] = []
+    for script in SCRIPT.findall(html):
+        if "__next_f.push" not in script:
+            continue
+        for match in NEXT_PUSH.finditer(script):
+            try:
+                argument, _ = JSON_DECODER.raw_decode(script, match.end())
+            except ValueError:
+                continue
+            payload = argument[1] if isinstance(argument, list) and len(argument) >= 2 else argument
+            if isinstance(payload, (dict, list)):
+                chunks.append(payload)
+                continue
+            if not isinstance(payload, str):
+                continue
+            stripped = payload.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    chunks.append(json.loads(stripped))
+                except ValueError:
+                    pass
+            for line in payload.splitlines():
+                rest = line.strip().split(":", 1)[-1]
+                if not rest.startswith(("{", "[")):
+                    continue
+                try:
+                    chunks.append(json.loads(rest))
+                except ValueError:
+                    pass
+    return chunks
+
+
+def room_payloads(value: object) -> list[dict]:
+    """Tìm payload phòng tĩnh lồng sâu trong cây SSR."""
+    found: list[dict] = []
+    if isinstance(value, dict):
+        if "physicRoomMap" in value or "roomPopInfo" in value:
+            return [value]
+        for child in value.values():
+            found.extend(room_payloads(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(room_payloads(child))
+    return found
 
 
 def blocked_reason(html: str, final_url: str) -> str | None:
@@ -168,6 +222,16 @@ def packets_from_html(html: str) -> list[dict]:
     if desc:
         packets.append({"url": "embedded:page-meta", "method": "EMBEDDED",
                         "status": 200, "response": {"description": desc}})
+    seen_rooms: set[str] = set()
+    for chunk in next_f_chunks(html):
+        for payload in room_payloads(chunk):
+            signature = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"))
+            if signature in seen_rooms:
+                continue
+            seen_rooms.add(signature)
+            packets.append({"url": "embedded:hotel-rooms", "method": "EMBEDDED",
+                            "status": 200, "response": payload})
     return packets
 
 
@@ -182,8 +246,14 @@ async def export_cookies(locale: str, currency: str) -> Path:
 
     target = cookie_file(locale, currency)
     async with async_playwright() as pw:
+        launch_options = {
+            "headless": True,
+        }
+        proxy = config.browser_proxy()
+        if proxy:
+            launch_options["proxy"] = proxy
         context = await pw.chromium.launch_persistent_context(
-            str(config.profile_dir(locale, currency)), headless=True)
+            str(config.profile_dir(locale, currency)), **launch_options)
         try:
             page = context.pages[0] if context.pages else await context.new_page()
             await page.goto(f"https://{MARKET_HOST.get(locale, 'www.trip.com')}/",
@@ -227,7 +297,8 @@ def headers_for(locale: str) -> dict:
 
 def fetch_one(client, hotel_id: str, locale: str, currency: str,
               checkin: str, checkout: str, save_html: bool = False,
-              mau: dict | None = None) -> tuple[dict, str | None]:
+              mau: dict | None = None,
+              visitor_id: str | None = None) -> tuple[dict, str | None]:
     """Trả về (dump raw, lý do bị chặn nếu có)."""
     url = detail_url(hotel_id, locale, currency, checkin, checkout)
     response = client.get(url, headers=headers_for(locale), follow_redirects=True)
@@ -251,7 +322,8 @@ def fetch_one(client, hotel_id: str, locale: str, currency: str,
         for ten_api in sorted(mau.get("apis") or {}):
             try:
                 api_url, api_headers, body = fast_api.payload_for(
-                    mau, ten_api, hotel_id, checkin, checkout, ctx)
+                    mau, ten_api, hotel_id, checkin, checkout, ctx,
+                    visitor_id=visitor_id)
                 r = client.post(api_url, json=body,
                                 headers={**headers_for(locale), **api_headers})
                 value = r.json()
@@ -273,6 +345,11 @@ def fetch_one(client, hotel_id: str, locale: str, currency: str,
     normalized["check_in"], normalized["check_out"] = checkin, checkout
     normalized["crawled_at"] = datetime.now().isoformat(timespec="seconds")
     normalized["locale"], normalized["currency"] = locale, currency
+    normalized["data_mode"] = "api-enriched" if mau else "ssr-static"
+    normalized["api_enriched"] = bool(mau)
+    normalized["rooms_live"] = any(
+        "getHotelRoomListOversea" in str(packet.get("url") or "")
+        for packet in packets)
     if reason:
         normalized["error"] = f"Trip.com chặn: {reason}"
     elif not packets:
@@ -298,8 +375,9 @@ def save(dump: dict, hotel_id: str, locale: str, currency: str,
     target = folder / f"{hotel_id}.json"
 
     if ok and into_raw:
-        cu = _packet_count(target)
-        if cu > len(dump.get("responses") or []):
+        old_quality = _raw_quality(target)
+        new_quality = _dump_quality(dump)
+        if old_quality > new_quality:
             return target, True          # raw cũ nhiều dữ liệu hơn → giữ nguyên
 
     name = (f"{hotel_id}.json" if ok else
@@ -307,12 +385,31 @@ def save(dump: dict, hotel_id: str, locale: str, currency: str,
     return raw_store.write(folder / name, dump), False
 
 
-def _packet_count(path: Path) -> int:
-    """Số packet trong raw đang có (0 nếu chưa có hoặc đọc không được)."""
+def _dump_quality(dump: dict) -> tuple[int, int, int, int]:
+    """Xếp raw theo: thành công, có API phòng, có offer, số packet."""
+    normalized = dump.get("normalized") or {}
+    responses = dump.get("responses") or []
+    if not normalized.get("success") or any(
+            api_blocked(packet.get("response")) for packet in responses):
+        return (0, 0, 0, 0)
+    room_packets = [packet for packet in responses
+                    if "getHotelRoomListOversea" in str(packet.get("url") or "")]
+    has_offers = False
+    for packet in room_packets:
+        response = packet.get("response") or {}
+        data = response.get("data") or {} if isinstance(response, dict) else {}
+        if data.get("saleRoomMap"):
+            has_offers = True
+            break
+    return (1, int(bool(room_packets)), int(has_offers), len(responses))
+
+
+def _raw_quality(path: Path) -> tuple[int, int, int, int]:
+    """Chất lượng raw đang có; raw API không bị SSR tĩnh ghi đè."""
     try:
-        return len(raw_store.read(path).get("responses") or [])
+        return _dump_quality(raw_store.read(path))
     except Exception:
-        return 0
+        return (0, 0, 0, 0)
 
 
 # ---------------------------------------------------------------------- main
@@ -345,13 +442,15 @@ def main(args) -> int:
             print("   -", a)
         return 0
 
-    mau = fast_api.load_templates(args.locale, args.currency)
-    if mau:
+    mau = fast_api.load_templates(args.locale, args.currency) if args.enrich_apis else None
+    if args.enrich_apis and mau:
         print(f"Dùng mẫu API của khách sạn {mau['hotel_id']} "
               f"({len(mau.get('apis') or {})} API)")
+    elif args.enrich_apis:
+        raise SystemExit("Chưa có mẫu API. Tạo bằng --build-templates <HOTEL_ID>.")
     else:
-        print("Chưa có mẫu API → chỉ lấy được phần tĩnh trong HTML. "
-              "Tạo mẫu: --build-templates <mã khách sạn đã cào bằng crawl_detail>")
+        print("Chế độ SSR tĩnh: không gọi API phòng/giá; "
+              "dùng --enrich-apis cho lượt enrichment riêng.")
 
     ids = read_ids(args)
     if args.limit:
@@ -379,7 +478,8 @@ def main(args) -> int:
             return
         try:
             dump, reason = fetch_one(client, hotel_id, args.locale, args.currency,
-                                     checkin, checkout, save_html=args.save_html, mau=mau)
+                                     checkin, checkout, save_html=args.save_html, mau=mau,
+                                     visitor_id=cookies.get("UBT_VID"))
         except Exception as exc:
             with khoa:
                 dem["hong"] += 1
@@ -406,7 +506,17 @@ def main(args) -> int:
                 dem["hong"] += 1
                 print(f"  [{index}/{len(ids)}] {hotel_id} THIẾU | {n.get('error')}")
 
-    with httpx.Client(cookies=cookies, timeout=args.timeout, http2=True) as client:
+    client_options = {
+        "cookies": cookies,
+        "timeout": args.timeout,
+        "http2": True,
+    }
+    proxy_url = config.httpx_proxy_url()
+    if proxy_url:
+        client_options["proxy"] = proxy_url
+        print("Proxy: đang bật cho toàn bộ request HTTP")
+
+    with httpx.Client(**client_options) as client:
         if args.concurrency <= 1:
             for index, hotel_id in enumerate(ids, 1):
                 lam_mot(index, hotel_id, client)
@@ -458,6 +568,9 @@ if __name__ == "__main__":
     ap.add_argument("--build-templates", metavar="HOTEL_ID",
                     help="dựng mẫu API từ raw của khách sạn này (raw phải do "
                          "crawl_detail.py cào, có kèm request)")
+    ap.add_argument("--enrich-apis", action="store_true",
+                    help="gọi lại API trong template để lấy giá/offers/nearby; "
+                         "mặc định chỉ cào SSR tĩnh")
     ap.add_argument("--save-html", action="store_true",
                     help="lưu HTML thô vào output/html để soi cấu hình API trong SSR")
     ap.add_argument("--into-raw", action="store_true",
