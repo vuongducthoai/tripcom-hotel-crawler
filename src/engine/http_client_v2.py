@@ -177,25 +177,47 @@ class FastHttpClient:
         host = "www.trip.com" if locale.lower().startswith("en") else "vn.trip.com"
         url = f"https://{host}/restapi/soa2/28820/ctGetNearbyPlaceInfo"
 
+        vid = f"{int(time.time()*1000)}.{random.randint(100000, 999999)}"
         post_headers = {
-            **CHROME_HEADERS,
-            "Content-Type": "application/json;charset=UTF-8",
-            "Accept": "application/json, text/plain, */*",
+            "User-Agent": CHROME_HEADERS["User-Agent"],
+            "Accept": "application/json",
+            "Content-Type": "application/json",
             "Origin": f"https://{host}",
             "Referer": referer or f"https://{host}/hotels/detail/?hotelId={hotel_id}",
             "cookieorigin": f"https://{host}",
+            "locale": locale,
+            "currency": currency.upper(),
+            "x-ctx-locale": locale,
+            "x-ctx-currency": currency.upper(),
+            "x-ctx-ubt-vid": vid,
+            "Sec-Ch-Ua": CHROME_HEADERS["Sec-Ch-Ua"],
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
         }
 
         payload: dict[str, Any] = {
-            "masterHotelId": int(hotel_id),
             "cityId": int(city_id or 0),
+            "mapType": "gg",
+            "masterHotelId": int(hotel_id),
+            "oversea": False,
             "provinceId": int(province_id or 0),
+            "head": {
+                "platform": "PC",
+                "cver": "0",
+                "cid": vid,
+                "bu": "IBU",
+                "group": "trip",
+                "locale": locale,
+                "currency": currency.upper(),
+                "timezone": "7",
+                "pageId": "10320668147",
+                "vid": vid,
+                "isSSR": False,
+            },
         }
-        if lat is not None and lng is not None:
-            payload["coordinate"] = {"lat": float(lat), "lng": float(lng)}
 
         proxy_url = resolve_proxy_url(self.base_proxy, hotel_id, 1)
         try:
