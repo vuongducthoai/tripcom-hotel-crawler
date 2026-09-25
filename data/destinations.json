@@ -1,0 +1,656 @@
+{
+  "Australia": {
+    "countryId": 15,
+    "countryName": "Australia",
+    "cities": [
+      {
+        "cityId": 358,
+        "cityName": "Melbourne",
+        "provinceId": 10264,
+        "provinceName": "Victoria"
+      }
+    ]
+  },
+  "Cambodia": {
+    "countryId": 50,
+    "countryName": "Cambodia",
+    "cities": [
+      {
+        "cityId": 303,
+        "cityName": "Phnom Penh",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 1369,
+        "cityName": "Siem Reap",
+        "provinceId": 11208,
+        "provinceName": "Siem Reap Province"
+      }
+    ]
+  },
+  "Canada": {
+    "countryId": 47,
+    "countryName": "Canada",
+    "cities": [
+      {
+        "cityId": 476,
+        "cityName": "Vancouver",
+        "provinceId": 10083,
+        "provinceName": "British Columbia"
+      },
+      {
+        "cityId": 461,
+        "cityName": "Toronto",
+        "provinceId": 10051,
+        "provinceName": "Ontario"
+      },
+      {
+        "cityId": 759,
+        "cityName": "Montreal",
+        "provinceId": 10149,
+        "provinceName": "Quebec Province"
+      },
+      {
+        "cityId": 20356,
+        "cityName": "Laval",
+        "provinceId": 10149,
+        "provinceName": "Quebec Province"
+      },
+      {
+        "cityId": 66387,
+        "cityName": "Richmond",
+        "provinceId": 10083,
+        "provinceName": "British Columbia"
+      },
+      {
+        "cityId": 35556,
+        "cityName": "Burnaby",
+        "provinceId": 10083,
+        "provinceName": "British Columbia"
+      },
+      {
+        "cityId": 20460,
+        "cityName": "Mississauga",
+        "provinceId": 10051,
+        "provinceName": "Ontario"
+      }
+    ]
+  },
+  "China": {
+    "countryId": 1,
+    "countryName": "China",
+    "cities": [
+      {
+        "cityId": 1,
+        "cityName": "Beijing",
+        "provinceId": 1,
+        "provinceName": "Beijing"
+      },
+      {
+        "cityId": 2,
+        "cityName": "Shanghai",
+        "provinceId": 2,
+        "provinceName": "Shanghai"
+      },
+      {
+        "cityId": 32,
+        "cityName": "Guangzhou",
+        "provinceId": 23,
+        "provinceName": "Guangdong"
+      },
+      {
+        "cityId": 30,
+        "cityName": "Shenzhen",
+        "provinceId": 23,
+        "provinceName": "Guangdong"
+      },
+      {
+        "cityId": 28,
+        "cityName": "Chengdu",
+        "provinceId": 24,
+        "provinceName": "Sichuan"
+      },
+      {
+        "cityId": 477,
+        "cityName": "Wuhan",
+        "provinceId": 18,
+        "provinceName": "Hubei"
+      },
+      {
+        "cityId": 10,
+        "cityName": "Xi'an",
+        "provinceId": 27,
+        "provinceName": "Shaanxi"
+      },
+      {
+        "cityId": 17,
+        "cityName": "Hangzhou",
+        "provinceId": 12,
+        "provinceName": "Zhejiang"
+      },
+      {
+        "cityId": 58,
+        "cityName": "Hong Kong",
+        "provinceId": 32,
+        "provinceName": "Hong Kong"
+      }
+    ]
+  },
+  "Denmark": {
+    "countryId": 27,
+    "countryName": "Denmark",
+    "cities": [
+      {
+        "cityId": 260,
+        "cityName": "Copenhagen",
+        "provinceId": 10482,
+        "provinceName": "Hovedstaden"
+      }
+    ]
+  },
+  "France": {
+    "countryId": 31,
+    "countryName": "France",
+    "cities": [
+      {
+        "cityId": 192,
+        "cityName": "Paris",
+        "provinceId": 10107,
+        "provinceName": "Ile-de-France"
+      },
+      {
+        "cityId": 1473,
+        "cityName": "Rennes",
+        "provinceId": 10516,
+        "provinceName": "Brittany"
+      },
+      {
+        "cityId": 712,
+        "cityName": "Marseille",
+        "provinceId": 10216,
+        "provinceName": "Provence-Alpes-Cote d'Azur"
+      },
+      {
+        "cityId": 775,
+        "cityName": "Nice",
+        "provinceId": 10216,
+        "provinceName": "Provence-Alpes-Cote d'Azur"
+      },
+      {
+        "cityId": 1294,
+        "cityName": "Montpellier",
+        "provinceId": 10155,
+        "provinceName": "Occitanie"
+      },
+      {
+        "cityId": 1484,
+        "cityName": "Nantes",
+        "provinceId": 10165,
+        "provinceName": "Pays de la Loire"
+      },
+      {
+        "cityId": 9947,
+        "cityName": "Metz",
+        "provinceId": 10036,
+        "provinceName": "Grand Est"
+      },
+      {
+        "cityId": 3523,
+        "cityName": "Aix-en-Provence",
+        "provinceId": 10216,
+        "provinceName": "Provence-Alpes-Cote d'Azur"
+      }
+    ]
+  },
+  "Germany": {
+    "countryId": 28,
+    "countryName": "Germany",
+    "cities": [
+      {
+        "cityId": 250,
+        "cityName": "Frankfurt",
+        "provinceId": 10121,
+        "provinceName": "Hessen"
+      },
+      {
+        "cityId": 709,
+        "cityName": "Cologne",
+        "provinceId": 10069,
+        "provinceName": "North Rhine-Westphalia"
+      },
+      {
+        "cityId": 193,
+        "cityName": "Berlin",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 363,
+        "cityName": "Munich",
+        "provinceId": 10058,
+        "provinceName": "Bavaria"
+      },
+      {
+        "cityId": 763,
+        "cityName": "Hamburg",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 29782,
+        "cityName": "Oberhausen",
+        "provinceId": 10069,
+        "provinceName": "North Rhine-Westphalia"
+      },
+      {
+        "cityId": 765,
+        "cityName": "Stuttgart",
+        "provinceId": 10057,
+        "provinceName": "Baden-Wurttemberg"
+      }
+    ]
+  },
+  "India": {
+    "countryId": 107,
+    "countryName": "India",
+    "cities": [
+      {
+        "cityId": 62932,
+        "cityName": "Tuticorin",
+        "provinceId": 10558,
+        "provinceName": "Tamil Nadu"
+      },
+      {
+        "cityId": 1235,
+        "cityName": "Chennai",
+        "provinceId": 10558,
+        "provinceName": "Tamil Nadu"
+      },
+      {
+        "cityId": 495,
+        "cityName": "New Delhi",
+        "provinceId": 10567,
+        "provinceName": "Delhi"
+      },
+      {
+        "cityId": 1355,
+        "cityName": "Bengaluru",
+        "provinceId": 10566,
+        "provinceName": "Karnataka"
+      },
+      {
+        "cityId": 724,
+        "cityName": "Mumbai",
+        "provinceId": 10556,
+        "provinceName": "Maharashtra"
+      }
+    ]
+  },
+  "Indonesia": {
+    "countryId": 108,
+    "countryName": "Indonesia",
+    "cities": [
+      {
+        "cityId": 524,
+        "cityName": "Jakarta",
+        "provinceId": 11359,
+        "provinceName": "Special Capital Region of Jakarta"
+      },
+      {
+        "cityId": 88311,
+        "cityName": "Subang",
+        "provinceId": 11441,
+        "provinceName": "West Java"
+      },
+      {
+        "cityId": 153088,
+        "cityName": "Bekasi City",
+        "provinceId": 11441,
+        "provinceName": "West Java"
+      },
+      {
+        "cityId": 740,
+        "cityName": "Bandung City",
+        "provinceId": 11441,
+        "provinceName": "West Java"
+      },
+      {
+        "cityId": 1244,
+        "cityName": "Surabaya",
+        "provinceId": 11444,
+        "provinceName": "East Java"
+      },
+      {
+        "cityId": 723,
+        "cityName": "Bali",
+        "provinceId": 11445,
+        "provinceName": "Bali Province"
+      }
+    ]
+  },
+  "Japan": {
+    "countryId": 78,
+    "countryName": "Japan",
+    "cities": [
+      {
+        "cityId": 228,
+        "cityName": "Tokyo",
+        "provinceId": 0,
+        "provinceName": ""
+      }
+    ]
+  },
+  "Laos": {
+    "countryId": 55,
+    "countryName": "Laos",
+    "cities": [
+      {
+        "cityId": 486,
+        "cityName": "Vientiane",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 3677,
+        "cityName": "Luang Prabang",
+        "provinceId": 11108,
+        "provinceName": "Luang Prabang Province"
+      },
+      {
+        "cityId": 35797,
+        "cityName": "Vang Vieng",
+        "provinceId": 12541,
+        "provinceName": "Vientiane Province"
+      },
+      {
+        "cityId": 5607,
+        "cityName": "Pakse",
+        "provinceId": 12533,
+        "provinceName": "Champasak Province"
+      },
+      {
+        "cityId": 6568,
+        "cityName": "Savannakhet",
+        "provinceId": 12540,
+        "provinceName": "Savannakhet"
+      }
+    ]
+  },
+  "Netherlands": {
+    "countryId": 43,
+    "countryName": "Netherlands",
+    "cities": [
+      {
+        "cityId": 176,
+        "cityName": "Amsterdam",
+        "provinceId": 10067,
+        "provinceName": "Noord-Holland"
+      },
+      {
+        "cityId": 718,
+        "cityName": "Rotterdam",
+        "provinceId": 10727,
+        "provinceName": "Zuid-Holland"
+      },
+      {
+        "cityId": 715,
+        "cityName": "Hague",
+        "provinceId": 10727,
+        "provinceName": "Zuid-Holland"
+      }
+    ]
+  },
+  "Philippines": {
+    "countryId": 32,
+    "countryName": "Philippines",
+    "cities": [
+      {
+        "cityId": 364,
+        "cityName": "City of Manila",
+        "provinceId": 12620,
+        "provinceName": "Metro Manila"
+      },
+      {
+        "cityId": 61021,
+        "cityName": "Quezon City",
+        "provinceId": 12620,
+        "provinceName": "Metro Manila"
+      },
+      {
+        "cityId": 35808,
+        "cityName": "Taguig",
+        "provinceId": 12620,
+        "provinceName": "Metro Manila"
+      },
+      {
+        "cityId": 121853,
+        "cityName": "Pasay",
+        "provinceId": 12620,
+        "provinceName": "Metro Manila"
+      },
+      {
+        "cityId": 62744,
+        "cityName": "Makati",
+        "provinceId": 12620,
+        "provinceName": "Metro Manila"
+      }
+    ]
+  },
+  "Qatar": {
+    "countryId": 163,
+    "countryName": "Qatar",
+    "cities": [
+      {
+        "cityId": 1401,
+        "cityName": "Doha",
+        "provinceId": 0,
+        "provinceName": ""
+      }
+    ]
+  },
+  "Singapore": {
+    "countryId": 3,
+    "countryName": "Singapore",
+    "cities": [
+      {
+        "cityId": 73,
+        "cityName": "Singapore",
+        "provinceId": 0,
+        "provinceName": ""
+      }
+    ]
+  },
+  "South Korea": {
+    "countryId": 42,
+    "countryName": "South Korea",
+    "cities": [
+      {
+        "cityId": 274,
+        "cityName": "Seoul",
+        "provinceId": 0,
+        "provinceName": ""
+      }
+    ]
+  },
+  "Thailand": {
+    "countryId": 4,
+    "countryName": "Thailand",
+    "cities": [
+      {
+        "cityId": 359,
+        "cityName": "Bangkok",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 36081,
+        "cityName": "Nonthaburi",
+        "provinceId": 11054,
+        "provinceName": "Nonthaburi Province"
+      },
+      {
+        "cityId": 622,
+        "cityName": "Pattaya",
+        "provinceId": 10087,
+        "provinceName": "Chon Buri Province"
+      },
+      {
+        "cityId": 725,
+        "cityName": "Phuket",
+        "provinceId": 11032,
+        "provinceName": "Phuket Province"
+      }
+    ]
+  },
+  "United Arab Emirates": {
+    "countryId": 9,
+    "countryName": "United Arab Emirates",
+    "cities": [
+      {
+        "cityId": 220,
+        "cityName": "Dubai",
+        "provinceId": 10965,
+        "provinceName": "Emirate of Dubai"
+      },
+      {
+        "cityId": 766,
+        "cityName": "Abu Dhabi",
+        "provinceId": 10964,
+        "provinceName": "Emirate of Abu Dhabi"
+      }
+    ]
+  },
+  "USA": {
+    "countryId": 66,
+    "countryName": "United States",
+    "cities": [
+      {
+        "cityId": 347,
+        "cityName": "Los Angeles",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 27020,
+        "cityName": "Irvine",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 698,
+        "cityName": "San Diego",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 1880,
+        "cityName": "San Jose",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 20582,
+        "cityName": "San Mateo",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 26207,
+        "cityName": "Corte Madera",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 334022,
+        "cityName": "Colma",
+        "provinceId": 10125,
+        "provinceName": "California"
+      },
+      {
+        "cityId": 346157,
+        "cityName": "Moncure",
+        "provinceId": 10068,
+        "provinceName": "North Carolina"
+      },
+      {
+        "cityId": 1406,
+        "cityName": "Raleigh",
+        "provinceId": 10068,
+        "provinceName": "North Carolina"
+      },
+      {
+        "cityId": 25773,
+        "cityName": "Miami",
+        "provinceId": 10109,
+        "provinceName": "Florida"
+      },
+      {
+        "cityId": 26619,
+        "cityName": "Houston",
+        "provinceId": 10094,
+        "provinceName": "Texas"
+      },
+      {
+        "cityId": 705,
+        "cityName": "Dallas",
+        "provinceId": 10094,
+        "provinceName": "Texas"
+      }
+    ]
+  },
+  "Vietnam": {
+    "countryId": 111,
+    "countryName": "Vietnam",
+    "cities": [
+      {
+        "cityId": 301,
+        "cityName": "Ho Chi Minh City",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 286,
+        "cityName": "Hanoi",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 1356,
+        "cityName": "Da Nang",
+        "provinceId": 0,
+        "provinceName": ""
+      },
+      {
+        "cityId": 1777,
+        "cityName": "Nha Trang",
+        "provinceId": 11120,
+        "provinceName": "Khanh Hoa Province"
+      },
+      {
+        "cityId": 5204,
+        "cityName": "Dalat",
+        "provinceId": 11123,
+        "provinceName": "Lam Dong Province"
+      },
+      {
+        "cityId": 4134,
+        "cityName": "Phan Thiet",
+        "provinceId": 11124,
+        "provinceName": "Binh Thuan Province"
+      },
+      {
+        "cityId": 5649,
+        "cityName": "Phu Quoc Island",
+        "provinceId": 11513,
+        "provinceName": "Kien Giang Province"
+      },
+      {
+        "cityId": 36145,
+        "cityName": "Can Tho",
+        "provinceId": 0,
+        "provinceName": ""
+      }
+    ]
+  }
+}
