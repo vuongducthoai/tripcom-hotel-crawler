@@ -67,6 +67,7 @@ class Bundle:
     raw_path: str | None
     has_detail: bool = False
     detail_text: dict = field(default_factory=dict)     # chữ lấy từ hotelDetailResponse
+    desc_labels: list = field(default_factory=list)     # hotelDescriptionInfo.lables
     rooms_sold_out: bool = False
     country: M.Country | None = None
     city: M.City | None = None
@@ -113,6 +114,17 @@ def api(dump: dict, name: str) -> Any:
 def api_data(dump: dict, name: str) -> dict:
     value = api(dump, name)
     return (value.get("data") or {}) if isinstance(value, dict) else {}
+
+
+def static_room_data(dump: dict) -> dict:
+    """Lấy cấu trúc phòng tĩnh từ SSR khi không có API giá."""
+    for packet in dump.get("responses") or []:
+        if packet.get("url") != "embedded:hotel-rooms":
+            continue
+        value = packet.get("response")
+        if isinstance(value, dict) and (value.get("physicRoomMap") or value.get("roomPopInfo")):
+            return value
+    return {}
 
 
 ANTIBOT_XOR_KEY = 0x0A
@@ -259,6 +271,48 @@ def first_int(text: Any) -> int | None:
     return int(found.group()) if found else None
 
 
+ROOM_COUNT_LABEL = re.compile(r"(s\u1ed1\s*ph\u00f2ng|number\s+of\s+rooms|rooms?)\s*[:\uff1a]\s*(\d+)", re.I)
+
+
+# Trip.com để mô tả ở HAI chỗ và chúng KHÔNG bằng nhau:
+#   hotelDescriptionInfo.description  → thường chỉ đoạn mở đầu (~200 ký tự)
+#   hotelDescriptionInfo.sectionList  → đầy đủ, mỗi phần tử một đoạn
+# Trước đây lấy .description trước nên mất phần lớn nội dung. Giờ lấy bản DÀI
+# HƠN, và khử đoạn trùng vì có khách sạn Trip.com trả lặp (744865 bản EN).
+def gop_mo_ta(desc_info: dict) -> str:
+    """Ghép mô tả đầy đủ nhất từ hotelDescriptionInfo."""
+    cac_doan = [str(x.get("desc") or "").strip()
+                for x in (desc_info.get("sectionList") or []) if isinstance(x, dict)]
+    day_du = "\n".join(d for d in cac_doan if d)
+    ngan = str(desc_info.get("description") or "").strip()
+    tho = day_du if len(day_du) >= len(ngan) else ngan
+    da_co, sach = set(), []
+    for dong in tho.split("\n"):
+        key = dong.strip()
+        if not key or key in da_co:
+            continue
+        da_co.add(key)
+        sach.append(key)
+    return "\n".join(sach)
+
+
+def room_count_from_labels(labels: Any) -> int | None:
+    """hotelDescriptionInfo.lables → số phòng.
+
+    Trip.com trả ["Khai Tr\u01b0\u01a1ng: 2006", "T\u00e2n Trang: 2025", "S\u1ed1 Ph\u00f2ng: 198"];
+    bản tiếng Anh là "Number of Rooms: 7". Năm khai trương/tân trang đã có ở
+    hotelBaseInfo nên ở đây chỉ lấy số phòng.
+    """
+    if not isinstance(labels, (list, tuple)):
+        return None
+    for item in labels:
+        found = ROOM_COUNT_LABEL.search(str(item or ""))
+        if found:
+            value = int(found.group(2))
+            return value if 1 <= value <= 10000 else None
+    return None
+
+
 def parse_ms_date(value: Any) -> datetime | None:
     """'/Date(1789923600000+0800)/' → datetime UTC."""
     found = re.search(r"/Date\((-?\d+)", str(value or ""))
@@ -319,6 +373,9 @@ def check_response(dump: dict, raw_locale: str, currency: str, file_hotel_id: st
         return None
     if normalized.get("page_dead"):
         issues.add("page_dead", "hotel", value=normalized.get("page_dead"))
+        return None
+    if normalized.get("success") is False:
+        issues.add("crawl_failed", "hotel", value=str(normalized.get("error") or "unknown")[:300])
         return None
 
     # Ngôn ngữ: thông số trong raw + chữ giao diện có đúng thứ tiếng không
@@ -398,6 +455,8 @@ def extract_detail(b: Bundle, detail: dict, c: Cleaner, issues: Issues) -> None:
 
     lat, lng = c.coords(position.get("lat"), position.get("lng"), "hotel", b.trip_hotel_id)
     open_year, reno_year = first_int(base.get("openYear")), first_int(base.get("fitmentYear"))
+    room_count = room_count_from_labels(
+        (detail.get("hotelDescriptionInfo") or {}).get("lables") or b.desc_labels)
     if open_year and reno_year and reno_year < open_year:
         issues.add("renovated_before_open", "hotel", field="renovated_year",
                    value=f"{open_year}/{reno_year}")
@@ -411,6 +470,7 @@ def extract_detail(b: Bundle, detail: dict, c: Cleaner, issues: Issues) -> None:
         "medal_type": medal.get("type"), "open_year": open_year, "renovated_year": reno_year,
         "latitude": lat, "longitude": lng,
         "is_private_host": bool(policy.get("privateHostInfo")),
+        "room_count": room_count,
     }, issues, "hotel", b.trip_hotel_id)
     if hotel:
         b.hotel = hotel
@@ -423,8 +483,7 @@ def extract_detail(b: Bundle, detail: dict, c: Cleaner, issues: Issues) -> None:
     if local and local == c.text(name_info.get("name")):
         local = None     # tên địa phương trùng tên hiển thị → không lưu lặp
     desc_info = detail.get("hotelDescriptionInfo") or {}
-    description = c.text(desc_info.get("description")) or c.text(
-        "\n\n".join(s.get("desc") or "" for s in desc_info.get("sectionList") or []))
+    description = c.text(gop_mo_ta(desc_info))
     b.detail_text = {  # dùng lại ở extract_hotel_i18n
         "name": c.text(name_info.get("name")), "local_name": local,
         "address": c.text(position.get("address")), "zone_name": c.text(position.get("zoneName")),
@@ -729,20 +788,26 @@ def _wifi(info: dict) -> str | None:
 
 
 def extract_rooms(b: Bundle, dump: dict, c: Cleaner, issues: Issues) -> None:
-    data = api_data(dump, ROOM_API)
+    live_data = api_data(dump, ROOM_API)
+    data = live_data or static_room_data(dump)
     normalized = dump.get("normalized") or {}
     # Chỉ tin cờ của crawler: isRoomListSoldOut của Trip.com có thể True
     # ngay cả khi vẫn còn gói giá bán được (gặp thật ở hotel 134013415).
     b.rooms_sold_out = bool(normalized.get("rooms_sold_out"))
     physic = data.get("physicRoomMap") or {}
     sales = data.get("saleRoomMap") or {}
+    if not live_data:
+        issues.add("no_room_api", "hotel",
+                   detail="có thể vẫn có loại phòng tĩnh từ SSR, nhưng không có giá/offers")
     if not physic:
-        issues.add("rooms_sold_out" if b.rooms_sold_out else "no_room_api", "hotel")
+        if b.rooms_sold_out:
+            issues.add("rooms_sold_out", "hotel")
         return
 
     # popup: Trip.com có lúc khóa theo mã phòng, có lúc theo khóa gói "id_roomCode"
     pops_by_room: dict[str, dict] = {}
-    for key, pop in (api_data(dump, POP_API).get("roomPopInfo") or {}).items():
+    popup_data = api_data(dump, POP_API) or data
+    for key, pop in (popup_data.get("roomPopInfo") or {}).items():
         room_id = key if key in physic else str((sales.get(key) or {}).get("physicalRoomId") or "")
         if room_id and room_id not in pops_by_room:
             pops_by_room[room_id] = pop
@@ -1074,6 +1139,10 @@ def build_bundle(dump: dict, *, raw_locale: str, currency: str, raw_path: str | 
     if detail and master and master != hotel_id:
         issues.add("detail_mismatch", "hotel", value=f"hotelDetailResponse của {master}")
         detail = None
+    described = api(dump, "embedded:hotel-description")
+    labels = ((described or {}).get("hotelDescriptionInfo") or {}).get("lables")
+    if isinstance(labels, list):
+        b.desc_labels = labels
     if detail:
         b.has_detail = True
         extract_detail(b, detail, c, issues)

@@ -1,5 +1,17 @@
 # Project Worklog
 
+### 2026-09-25
+
+| Member | Task | Status | Output |
+| :--- | :--- | :--- | :--- |
+| Vương Đức Thoại | Hoàn thiện đặc tả và trích xuất bảng dịch thuật phục vụ mentor `trip_tmp_property_translation` (`docs/ghi_chu_mentor.md`, `scripts/export_trip_property_translation.sql`, `dump_translation.sql`); bổ sung migrations 004 (Tripadvisor API matching), 005 (số phòng), 006 (nhóm lân cận theo ngôn ngữ); nâng cấp `src/v2/extract.py` gộp mô tả đầy đủ từ `sectionList` và khử trùng lặp; xây dựng module nhận diện chặn bot `src/block_detect.py`, mẫu API `src/fast_api.py`, script kiểm tra proxy `scripts/test_proxy.py` và cờ `--chi-dump` trên `src/crawl_fast.py` và `scripts/crawl_v2.py` | ✅ Done | [`docs/ghi_chu_mentor.md`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/docs/ghi_chu_mentor.md), [`dump_translation.sql`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/dump_translation.sql), [`scripts/export_trip_property_translation.sql`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/scripts/export_trip_property_translation.sql), `migrations_v2/004-006` |
+| Trần Đăng Nguyên | Kéo và tích hợp toàn diện các cập nhật mới nhất từ `origin/main` (commit `79c693f` → `0494b23`); phân tích và xử lý dứt điểm 2 xung đột merge: (1) Hợp nhất `README.md` dung hòa trọn vẹn luồng dữ liệu Schema V2, kiến trúc No-Browser Crawler, hướng dẫn proxy và quy trình dump mentor; (2) Tái cấu trúc và hợp nhất Dual-Engine trên [`src/crawl_fast.py`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/src/crawl_fast.py) dung nạp hoàn hảo cả HTTPX runner (hỗ trợ `--chi-dump`, `--into-raw`, mẫu template API) lẫn No-Browser Async runner (`curl_cffi` Chrome 124 TLS impersonation, SSR in-memory parser, proxy pool, DB auto-loader) | ✅ Done | [`README.md`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/README.md), [`src/crawl_fast.py`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/src/crawl_fast.py) |
+| Trần Đăng Nguyên | Bổ sung chốt an toàn trong kiểm thử mẫu raw [`tests/test_crawl_fast.py`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/tests/test_crawl_fast.py); chạy kiểm thử hồi quy toàn diện toàn bộ test suite dự án, nghiệm thu 155/155 unit tests đạt chuẩn tuyệt đối (100% passed) và biên dịch kiểm tra cú pháp toàn bộ pipeline cào | ✅ Done | [`tests/test_crawl_fast.py`](file:///c:/Users/truyk/OneDrive/Documents/tripcom-hotel-crawler/tests/test_crawl_fast.py); 155/155 tests passed; syntax py_compile passed |
+
+**Tổng kết ngày**: Hợp nhất thành công toàn bộ các tính năng cốt lõi từ `origin/main` vào nhánh `CrawlingIssue`: hệ thống bảng dịch thuật mentor `trip_tmp_property_translation` với 15.706 dòng dump chuẩn, các migration 004-006, module đối soát Tripadvisor API, phát hiện chặn bot `block_detect.py` và trích xuất mô tả nâng cao `gop_mo_ta`. Xử lý hoàn hảo xung đột merge tại `README.md` và `src/crawl_fast.py` theo mô hình Dual-Engine hỗ trợ song song cả chế độ `--chi-dump` phục vụ mentor lẫn No-Browser HTTP crawler siêu tốc (0.5s/khách sạn, RAM 70MB). Toàn bộ 155/155 unit tests vượt qua kiểm thử thành công.
+
+---
+
 ### 2026-09-24
 
 | Member | Task | Status | Output |

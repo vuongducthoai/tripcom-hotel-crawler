@@ -23,6 +23,7 @@ from typing import Any
 
 from playwright.async_api import Error as BrowserError, async_playwright
 
+import block_detect
 import config
 import raw_store
 from db.i18n import language_key
@@ -52,46 +53,10 @@ ROOM_LIST_TIMEOUT_MS = 9000
 ANTIBOT_XOR_KEY = 0x0A
 
 
-def _decode_obfuscated(value: list) -> str | None:
-    """Giải mảng byte XOR của Trip.com; None nếu không phải thông báo chặn.
-
-    Dạng này trông như [113, 40, 108, ...] nên bộ dò cũ duyệt qua chỉ thấy
-    toàn số nguyên và không nhận ra mình đang bị từ chối.
-    """
-    if not (50 <= len(value) <= 20_000):
-        return None
-    if not all(isinstance(byte, int) and 0 <= byte <= 255 for byte in value):
-        return None
-    text = "".join(chr(byte ^ ANTIBOT_XOR_KEY) for byte in value)
-    return text if ("failedcause" in text or "Antibot" in text) else None
-
-
-def _blocked_reason(value: Any) -> str | None:
-    """Lý do Trip.com từ chối, None nếu response bình thường.
-
-    Bắt cả hai dạng đã gặp thật:
-      - dict có htlSpiderActionErrorCode  (vd 4030)
-      - mảng byte XOR có failedcause      (vd Antibot-Gray-ip)
-    """
-    if isinstance(value, dict):
-        if value.get("htlSpiderActionErrorCode") is not None:
-            return f"htlSpiderActionErrorCode={value['htlSpiderActionErrorCode']}"
-        for child in value.values():
-            found = _blocked_reason(child)
-            if found:
-                return found
-    elif isinstance(value, list):
-        decoded = _decode_obfuscated(value)
-        if decoded:
-            try:
-                return str(json.loads(decoded).get("failedcause") or "Antibot")
-            except Exception:
-                return "Antibot"
-        for child in value:
-            found = _blocked_reason(child)
-            if found:
-                return found
-    return None
+# Nhận diện chặn nằm ở block_detect.py để crawl_fast.py (không trình duyệt)
+# dùng chung mà khỏi import file này.
+_decode_obfuscated = block_detect.decode_obfuscated
+_blocked_reason = block_detect.blocked_reason
 
 
 def _has_detail(value: dict) -> bool:
@@ -293,12 +258,32 @@ async def _capture_response(resp, packets: list[dict]) -> None:
         value = json.loads(body)
     except Exception:
         return
-    packets.append({
+    packet = {
         "url": req.url.split("?", 1)[0],
         "method": req.method,
         "status": resp.status,
         "response": value,
-    })
+    }
+    # Lưu thêm request của các API cần thiết để crawler tĩnh (crawl_fast.py)
+    # gọi lại được bằng HTTP thuần, khỏi phải mở Chromium.
+    if any(marker in req.url for marker in TEMPLATE_APIS):
+        try:
+            packet["request"] = {
+                "url": req.url,
+                "post_data": req.post_data,
+                "headers": {k: v for k, v in (req.headers or {}).items()
+                            if k.lower() in TEMPLATE_HEADERS},
+            }
+        except Exception:
+            pass
+    packets.append(packet)
+
+
+# API mà crawler tĩnh cần gọi lại → lưu kèm request để dựng mẫu
+TEMPLATE_APIS = ("getHotelRoomListOversea", "ctGetNearbyPlaceInfo", "getHotelCommentInfo",
+                 "ctgethotelalbum", "getHotelRoomPopInfoPCOnline", "getDetailAdditionalInfo")
+TEMPLATE_HEADERS = {"content-type", "accept", "accept-language", "referer", "origin",
+                    "x-traceid", "cookieorigin", "currency", "locale"}
 
 
 async def _wait_for_capture_quiet(
@@ -366,6 +351,65 @@ async def _wait_for_room_list(
             except Exception:
                 return _has_room_list(packets)
     return _has_room_list(packets)
+
+
+# Khối địa điểm lân cận (API ctGetNearbyPlaceInfo) KHÔNG tự chạy khi chỉ cuộn
+# trang: bản tiếng Việt hiện sẵn khối "Xem xung quanh đây", còn bản tiếng Anh
+# giấu nó sau tab "Location" trên thanh mục lục — phải bấm vào mới nạp.
+# Bấm đúng một lần, không thấy tab thì thôi, không coi là lỗi.
+NHAN_MUC_VI_TRI = ("Location", "Vị trí", "Vị Trí", "Xem Trên Bản Đồ", "View on Map")
+
+
+def _co_nearby(packets) -> bool:
+    return any("ctGetNearbyPlaceInfo" in str(x.get("url", "")) for x in packets)
+
+
+async def _mo_muc_vi_tri(page, tasks, packets) -> bool:
+    """Bấm mục 'Vị trí / Location' để trang gọi ctGetNearbyPlaceInfo.
+
+    Bản tiếng Việt hiện sẵn khối 'Xem xung quanh đây' khi cuộn tới, còn bản
+    tiếng Anh giấu sau một tab phải bấm. In rõ đã thử gì để còn chỉnh.
+    """
+    if _co_nearby(packets):
+        print("   [vi-tri] API nearby đã có sẵn, không cần bấm.")
+        return True
+
+    cach = []
+    for nhan in NHAN_MUC_VI_TRI:
+        cach.append((f'role=tab "{nhan}"', lambda n=nhan: page.get_by_role("tab", name=n, exact=False)))
+        cach.append((f'role=button "{nhan}"', lambda n=nhan: page.get_by_role("button", name=n, exact=False)))
+        cach.append((f'role=link "{nhan}"', lambda n=nhan: page.get_by_role("link", name=n, exact=False)))
+        cach.append((f'text "{nhan}"', lambda n=nhan: page.get_by_text(n, exact=True)))
+
+    for ten_cach, lay in cach:
+        try:
+            loc = lay()
+            n = await loc.count()
+        except Exception as e:
+            print(f"   [vi-tri] {ten_cach}: lỗi dò ({type(e).__name__})")
+            continue
+        if n == 0:
+            continue
+        for i in range(min(n, 3)):
+            try:
+                muc = loc.nth(i)
+                if not await muc.is_visible():
+                    continue
+                await muc.scroll_into_view_if_needed(timeout=2000)
+                await muc.click(timeout=3000)
+                print(f"   [vi-tri] đã bấm {ten_cach} (phần tử {i})")
+            except Exception as e:
+                print(f"   [vi-tri] {ten_cach} phần tử {i}: bấm hỏng ({type(e).__name__})")
+                continue
+            await _wait_for_capture_quiet(
+                tasks, packets, min_wait_ms=800, max_wait_ms=6000, quiet_ms=600
+            )
+            if _co_nearby(packets):
+                print("   [vi-tri] ✔ bắt được ctGetNearbyPlaceInfo")
+                return True
+
+    print("   [vi-tri] ✘ không tìm/bấm được mục Vị trí — trang EN có thể dùng nhãn khác")
+    return False
 
 
 # Schema v2 cần khối hotelDetailResponse của trang (sao, tọa độ, thành phố,
@@ -519,6 +563,9 @@ async def crawl_one(
         # getHotelRoomList thì phải chờ thêm, nếu không sẽ ghi nhận "không có
         # phòng" trong khi thực ra chỉ là chưa kịp về.
         await _wait_for_room_list(tasks, packets, page)
+
+        # Mục "Vị trí / Location" phải bấm mới nạp địa điểm lân cận.
+        await _mo_muc_vi_tri(page, tasks, packets)
 
         # JSON-LD thường chứa mô tả/ảnh ngay cả khi API đổi endpoint.
         for script in await page.locator("script[type='application/ld+json']").all_text_contents():
@@ -864,6 +911,9 @@ async def main(args: argparse.Namespace) -> None:
             "viewport": config.VIEWPORT,
             "args": ["--disable-blink-features=AutomationControlled"],
         }
+        proxy = config.browser_proxy()
+        if proxy:
+            launch_options["proxy"] = proxy
         if args.browser_channel:
             launch_options["channel"] = args.browser_channel
         try:

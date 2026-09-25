@@ -6,6 +6,8 @@
     python scripts/crawl_v2.py --city-id 1356                   # một thành phố (Đà Nẵng)
     python scripts/crawl_v2.py                                  # toàn bộ hotel trong DB
     python scripts/crawl_v2.py --list-file api_hotels_<cityId>_….json   # thành phố nước ngoài
+    python scripts/crawl_v2.py --only vi                        # chỉ tiếng Việt (tiếng Anh cào sau)
+    python scripts/crawl_v2.py --only en                        # bù tiếng Anh, tự dùng ngày của bản Việt
 
 Mỗi lô (mặc định 50 hotel):
     1. Cào bản Việt  (src/crawl_detail.py --ids-file … --checkin NGÀY)
@@ -48,6 +50,8 @@ STOP_SIGNALS = (
     ("Dừng an toàn", "Trip.com chặn liên tiếp"),
     ("Trình duyệt đã đóng", "trình duyệt Chromium đã đóng"),
     ("liên tiếp không ra phòng", "Trip.com đang giới hạn API phòng"),
+    ("Trip.com đang chặn", "Trip.com đang chặn request"),
+    (" BỊ CHẶN |", "Trip.com đang chặn request"),
 )
 
 
@@ -90,26 +94,34 @@ def hotels_in_list(list_file: str) -> tuple[list[str], Path]:
     return list(dict.fromkeys(ids)), path
 
 
-def raw_state(hotel: str, locale: str, currency: str) -> tuple[bool, str | None]:
-    """(raw có khối hotelDetailResponse và cào thành công?, ngày nhận phòng)."""
+def raw_state(hotel: str, locale: str, currency: str) -> tuple[bool, str | None, bool]:
+    """(raw SSR thành công?, ngày nhận phòng, có API phòng live?)."""
     path = config.OUTPUT_DIR / "details" / "raw" / locale / currency / f"{hotel}.json"
     try:
         dump = raw_store.read(path)
     except Exception:
-        return False, None
+        return False, None, False
     normalized = dump.get("normalized") or {}
     has_block = any(p.get("url") == DETAIL_BLOCK_URL for p in dump.get("responses") or [])
-    return bool(has_block and normalized.get("success")), normalized.get("check_in")
+    has_room_api = any("getHotelRoomListOversea" in str(p.get("url") or "")
+                       for p in dump.get("responses") or [])
+    return (bool(has_block and normalized.get("success")),
+            normalized.get("check_in"), has_room_api)
 
 
 def done_v2(hotel: str) -> bool:
-    (vi_ok, vi_in), (en_ok, en_in) = (raw_state(hotel, *m) for m in MARKETS)
+    (vi_ok, vi_in, _), (en_ok, en_in, _) = (raw_state(hotel, *m) for m in MARKETS)
     return vi_ok and en_ok and vi_in == en_in
+
+
+def done_market(hotel: str, market: tuple[str, str], require_room_api: bool = False) -> bool:
+    ok, _, has_room_api = raw_state(hotel, *market)
+    return ok and (has_room_api or not require_room_api)
 
 
 # ---------------------------------------------------------------- gọi script có sẵn
 def run(argv: list[str], label: str, ok_codes=(0,)) -> tuple[int, list[str]]:
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1", PYTHONUNBUFFERED="1")  # in log ngay, không đợi đầy bộ đệm
     print(f"\n    $ python {' '.join(argv)}", flush=True)
     process = subprocess.Popen([sys.executable, *argv], cwd=str(ROOT), env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -125,12 +137,30 @@ def run(argv: list[str], label: str, ok_codes=(0,)) -> tuple[int, list[str]]:
     return process.returncode, lines
 
 
-def crawl(ids_file: Path, locale: str, currency: str, checkin: str, checkout: str, workers: int,
-          list_file: Path | None) -> str | None:
+def crawl(ids_file: Path, locale: str, currency: str, checkin: str | None, checkout: str | None,
+          workers: int, list_file: Path | None, fast: bool = False,
+          enrich_rooms: bool = False, chi_dump: bool = False) -> str | None:
     source = ["--file", str(list_file)] if list_file else ["--from-db"]
-    _, log = run(["src/crawl_detail.py", *source, "--locale", locale, "--currency", currency,
-                  "--ids-file", str(ids_file.relative_to(ROOT)), "--workers", str(workers),
-                  "--checkin", checkin, "--checkout", checkout], f"crawl_detail {locale}")
+    # checkin=None: không ép ngày — crawl_detail tự dùng lại ngày ở của bản thứ
+    # tiếng kia cho TỪNG hotel (nếu ngày đó còn ở tương lai), để ghép gói giá.
+    dates = ["--checkin", checkin, "--checkout", checkout] if checkin else []
+
+    if fast:
+        # Crawler tĩnh: tải HTML rồi gọi lại API, không mở Chromium. Ghi thẳng
+        # vào thư mục raw chính (vẫn không đè raw cũ nhiều dữ liệu hơn) để
+        # v2_loader đọc được như thường.
+        argv = ["src/crawl_fast.py", "--ids-file", str(ids_file.relative_to(ROOT)),
+                "--locale", locale, "--currency", currency, "--into-raw",
+                "--concurrency", str(min(workers, 4)), *dates]
+        if chi_dump:
+            argv.append("--chi-dump")
+        elif enrich_rooms:
+            argv.append("--enrich-apis")
+        _, log = run(argv, f"crawl_fast {locale}", ok_codes=(0, 1, 2))
+    else:
+        _, log = run(["src/crawl_detail.py", *source, "--locale", locale, "--currency", currency,
+                      "--ids-file", str(ids_file.relative_to(ROOT)), "--workers", str(workers),
+                      *dates], f"crawl_detail {locale}")
     return next((why for marker, why in STOP_SIGNALS if any(marker in line for line in log)), None)
 
 
@@ -144,6 +174,19 @@ def load(ids_file: Path, locale: str, validate_only: bool) -> bool:
 
 # ---------------------------------------------------------------- chương trình chính
 def main(args) -> None:
+    # --ids-file gộp vào args.ids: Windows giới hạn ~8000 ký tự cho một dòng
+    # lệnh, hơn nghìn id là vượt ngay.
+    if getattr(args, "ids_file", None):
+        duong_dan = Path(args.ids_file)
+        if not duong_dan.is_absolute() and not duong_dan.exists():
+            duong_dan = ROOT / duong_dan
+        if not duong_dan.exists():
+            raise SystemExit(f"Không tìm thấy file id: {args.ids_file}")
+        tu_file = [d.strip() for d in duong_dan.read_text(encoding="utf-8").splitlines()
+                   if d.strip() and not d.strip().startswith("#")]
+        args.ids = list(dict.fromkeys((args.ids or []) + tu_file))
+        print(f"--ids-file: đọc {len(tu_file)} id từ {duong_dan.name}")
+
     checkin = args.checkin or default_stay()[0]
     checkout = args.checkout or (datetime.fromisoformat(checkin) + timedelta(days=1)).date().isoformat()
     list_file = None
@@ -156,13 +199,27 @@ def main(args) -> None:
         scope = [str(h) for h in args.ids]
     else:
         scope = hotels_in_scope(args.city_id)
-    todo = [h for h in scope if args.redo or not done_v2(h)]
+    markets = [m for m in MARKETS if not args.only or m[0].startswith(args.only)]
+    if args.enrich_rooms:
+        todo = [h for h in scope if args.redo or any(
+            not done_market(h, market, require_room_api=True) for market in markets)]
+    elif args.only:
+        todo = [h for h in scope if args.redo or not done_market(
+            h, markets[0], require_room_api=args.enrich_rooms)]
+    else:
+        todo = [h for h in scope if args.redo or not done_v2(h)]
+    # --only en mà không chỉ ngày: mỗi hotel tự dùng ngày của bản tiếng Việt.
+    crawl_in, crawl_out = (None, None) if (args.only == "en" and not args.checkin) else (checkin, checkout)
     lots = [todo[i:i + args.lot_size] for i in range(0, len(todo), args.lot_size)]
     if args.max_lots:
         lots = lots[:args.max_lots]
 
-    print(f"Phạm vi {len(scope)} hotel · đã xong v2 {len(scope) - len(todo)} · cần cào {len(todo)}")
-    print(f"Ngày ở dùng chung cho cả hai thứ tiếng: {checkin} → {checkout}")
+    label = {"vi": "tiếng Việt", "en": "tiếng Anh"}.get(args.only, "cả hai thứ tiếng")
+    print(f"Phạm vi {len(scope)} hotel · đã xong ({label}) {len(scope) - len(todo)} · cần cào {len(todo)}")
+    if crawl_in:
+        print(f"Ngày ở: {crawl_in} → {crawl_out}")
+    else:
+        print("Ngày ở: lấy theo bản tiếng Việt của từng hotel (nếu ngày đó đã qua thì dùng ngày mặc định)")
     print(f"Chạy {len(lots)} lô × tối đa {args.lot_size} hotel "
           f"({'chỉ kiểm tra, không nạp' if args.validate_only else 'kiểm tra rồi nạp v2'})")
     if args.plan or not lots:
@@ -179,12 +236,14 @@ def main(args) -> None:
             ids_file = batch_dir / f"{stamp}_lot{number:03d}.txt"
             ids_file.write_text("".join(f"{h}\n" for h in lot), encoding="utf-8")
             stop = None
-            for locale, currency in MARKETS:
-                stop = crawl(ids_file, locale, currency, checkin, checkout, args.workers, list_file)
+            for locale, currency in markets:
+                stop = crawl(ids_file, locale, currency, crawl_in, crawl_out, args.workers,
+                         list_file, fast=args.fast, enrich_rooms=args.enrich_rooms,
+                         chi_dump=args.chi_dump)
                 if stop:
                     break
             # Kể cả khi phải dừng, vẫn kiểm tra + nạp phần đã cào được.
-            gate_ok = all([load(ids_file, locale, args.validate_only) for locale, _ in MARKETS])
+            gate_ok = all([load(ids_file, locale, args.validate_only) for locale, _ in markets])
             if stop:
                 raise StopAll(stop)
             if not gate_ok:
@@ -203,6 +262,9 @@ def main(args) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ids", nargs="+", help="chỉ các hotel này (thay cho đọc DB)")
+    ap.add_argument("--ids-file",
+                    help="file danh sách trip_hotel_id, mỗi dòng một id (bỏ dòng trống và "
+                         "dòng bắt đầu bằng #). Dùng khi danh sách quá dài cho dòng lệnh.")
     ap.add_argument("--city-id", type=int, help="chỉ một thành phố trong DB cũ, vd 1356 (Đà Nẵng)")
     ap.add_argument("--list-file", help="file danh sách của crawl_api.py (output/data/api_hotels_*.json)")
     ap.add_argument("--lot-size", type=int, default=50, help="số hotel mỗi lô (mặc định 50)")
@@ -211,7 +273,24 @@ if __name__ == "__main__":
     ap.add_argument("--pause", type=int, default=60, help="nghỉ giữa các lô, giây (mặc định 60)")
     ap.add_argument("--checkin", help="YYYY-MM-DD; mặc định thứ Hai tuần sau nữa")
     ap.add_argument("--checkout", help="YYYY-MM-DD; mặc định checkin + 1 ngày")
+    ap.add_argument("--only", choices=("vi", "en"),
+                    help="chỉ cào một thứ tiếng; --only en tự dùng ngày ở của bản tiếng Việt")
     ap.add_argument("--validate-only", action="store_true", help="cào + kiểm tra, KHÔNG nạp v2")
     ap.add_argument("--redo", action="store_true", help="cào lại cả hotel đã xong v2")
+    ap.add_argument("--fast", action="store_true",
+                    help="dùng crawl_fast.py (HTTP tĩnh, KHÔNG mở trình duyệt) thay cho "
+                         "crawl_detail.py; mặc định không gọi API phòng")
+    ap.add_argument("--enrich-rooms", action="store_true",
+                    help="với --fast: gọi API template để bù giá/offers; "
+                         "không bật thì chỉ cào SSR tĩnh")
+    ap.add_argument("--chi-dump", action="store_true",
+                    help="với --fast: chỉ lấy những gì file dump cần (mô tả, chính sách, "
+                         "địa điểm lân cận). Bỏ API phòng/giá/album — bớt ~60%% request "
+                         "tới Trip.com. Dùng khi chỉ cần dữ liệu cho anh mentor.")
     ap.add_argument("--plan", action="store_true", help="chỉ in kế hoạch")
-    main(ap.parse_args())
+    parsed = ap.parse_args()
+    if parsed.enrich_rooms and not parsed.fast:
+        ap.error("--enrich-rooms chỉ dùng cùng --fast")
+    if parsed.chi_dump and not parsed.fast:
+        ap.error("--chi-dump chỉ dùng cùng --fast")
+    main(parsed)

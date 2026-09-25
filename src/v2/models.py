@@ -53,6 +53,7 @@ class Hotel(Row):
     medal_type: Optional[int] = None
     open_year: Optional[int] = Field(default=None, ge=1800, le=2100)
     renovated_year: Optional[int] = Field(default=None, ge=1800, le=2100)
+    room_count: Optional[int] = Field(default=None, ge=1, le=10000)
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
     longitude: Optional[float] = Field(default=None, ge=-180, le=180)
     is_private_host: Optional[bool] = None

@@ -1,6 +1,6 @@
 const state = {
   rows: [], total: 0, limit: 20, offset: 0, search: "", locale: "vi", currency: "VND",
-  star: "", status: "", sort: "recent", hotelId: null, detail: null, sections: {}, requestId: 0,
+  star: "", status: "", sort: "recent", city: "", hotelId: null, detail: null, sections: {}, requestId: 0, soAnh: 60,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -11,9 +11,9 @@ const els = {
   page: $("#catalog-page"), prev: $("#catalog-prev"), next: $("#catalog-next"),
   search: $("#hotel-search"), locale: $("#catalog-locale"), currency: $("#catalog-currency"),
   star: $("#star-filter"), status: $("#status-filter"), sort: $("#sort-filter"),
+  city: $("#city-filter"), heroTitle: $("#hero-title"),
   dbStatus: $("#db-status"), detailLocale: $("#detail-locale"),
-  detailHero: $("#hotel-overview"), detailContent: $("#detail-content"), tripLink: $("#trip-link"),
-  tabs: $("#detail-tabs"), toast: $("#toast"),
+  detailBody: $("#detail-body"), tripLink: $("#trip-link"), toast: $("#toast"),
 };
 
 const fmt = (value) => new Intl.NumberFormat("vi-VN").format(Number(value || 0));
@@ -48,7 +48,36 @@ function catalogueParams() {
   if (state.search) params.set("search", state.search);
   if (state.star) params.set("star", state.star);
   if (state.status) params.set("status", state.status);
+  if (state.city) params.set("city", state.city);
   return params;
+}
+
+async function loadCities() {
+  // Thành phố nào có trong DB thì hiện thành phố đó — không gắn cứng TP.HCM nữa.
+  try {
+    const payload = await api("/api/cities");
+    const chon = state.city;
+    els.city.replaceChildren(new Option(`Tất cả thành phố (${fmt(payload.total)})`, ""));
+    for (const city of payload.cities || []) {
+      const ten = state.locale === "en" ? (city.name_en || city.name_vi) : (city.name_vi || city.name_en);
+      const qg = state.locale === "en" ? (city.country_en || city.country_vi) : (city.country_vi || city.country_en);
+      const nhan = `${ten}${qg ? " · " + qg : ""} (${fmt(city.hotel_count)})`;
+      els.city.appendChild(new Option(nhan, String(city.trip_city_id)));
+    }
+    els.city.value = chon;
+    capNhatTieuDe();
+  } catch (error) {
+    els.city.replaceChildren(new Option("Không tải được danh sách thành phố", ""));
+  }
+}
+
+function capNhatTieuDe() {
+  // Tiêu đề chạy theo thành phố đang chọn, không gắn cứng tên thành phố nào.
+  if (!els.heroTitle) return;
+  const chon = els.city.selectedOptions[0];
+  els.heroTitle.textContent = state.city && chon
+    ? `Khách sạn tại ${chon.textContent.replace(/\s*\(\d[\d.,]*\)\s*$/, "")}`
+    : "Khách sạn đã thu thập";
 }
 
 async function loadHotels() {
@@ -112,138 +141,392 @@ function renderPagination() {
   els.prev.disabled = state.offset === 0; els.next.disabled = state.offset + state.limit >= state.total;
 }
 
+/* ---------------------------------------------------------------------------
+   Trang chi tiết dựng theo bố cục trang khách sạn của Trip.com (một trang cuộn
+   liền mạch) để đối chiếu dữ liệu crawl với trang gốc cho nhanh.
+   Bố cục tự dựng, không dùng logo / nhận diện thương hiệu của Trip.com.
+--------------------------------------------------------------------------- */
+const TP_SECTIONS = ["images", "rooms", "prices", "policies", "nearby", "amenities"];
+
 async function openHotel(id, push = true) {
-  state.hotelId = Number(id); state.sections = {}; els.catalog.classList.add("hidden"); els.detail.classList.remove("hidden");
+  state.hotelId = Number(id);
+  state.sections = {};
+  state.soAnh = ANH_MOI_LAN;
+  els.catalog.classList.add("hidden");
+  els.detail.classList.remove("hidden");
   els.detailLocale.value = state.locale;
-  els.detailHero.innerHTML = '<div class="detail-loading">Đang tải thông tin khách sạn...</div>'; els.detailContent.innerHTML = '<div class="detail-loading">Đang tải dữ liệu...</div>';
-  window.scrollTo({top:0, behavior:"instant"});
-  if (push) { const url = new URL(location.href); url.searchParams.set("hotel", id); history.pushState({hotel:id}, "", url); }
+  els.detailBody.innerHTML = '<div class="detail-loading">Đang tải dữ liệu khách sạn...</div>';
+  window.scrollTo({top: 0, behavior: "instant"});
+  if (push) { const url = new URL(location.href); url.searchParams.set("hotel", id); history.pushState({hotel: id}, "", url); }
+  const requestId = ++state.requestId;
   try {
-    state.detail = await api(`/api/hotels/${id}?locale=${state.locale}`);
-    renderDetailHero(); await activateSection("overview");
+    const results = await Promise.all([
+      api(`/api/hotels/${id}?locale=${state.locale}`),
+      ...TP_SECTIONS.map((name) => api(`/api/hotels/${id}/${name}?locale=${state.locale}`).catch(() => ({items: []}))),
+    ]);
+    if (requestId !== state.requestId) return;
+    state.detail = results[0];
+    TP_SECTIONS.forEach((name, index) => { state.sections[name] = results[index + 1].items || []; });
+    renderTripDetail();
   } catch (error) {
-    els.detailHero.innerHTML = `<div class="error-box">${esc(error.message)}</div>`; els.detailContent.replaceChildren();
+    els.detailBody.innerHTML = `<div class="error-box">${esc(error.message)}</div>`;
   }
 }
 
 function closeHotel(push = true) {
-  state.hotelId = null; state.detail = null; state.sections = {}; els.detail.classList.add("hidden"); els.catalog.classList.remove("hidden");
+  state.hotelId = null; state.detail = null; state.sections = {}; state.requestId += 1;
+  els.detail.classList.add("hidden"); els.catalog.classList.remove("hidden");
   if (push) { const url = new URL(location.href); url.searchParams.delete("hotel"); history.pushState({}, "", url); }
-  window.scrollTo({top:0, behavior:"instant"});
+  window.scrollTo({top: 0, behavior: "instant"});
 }
 
-function renderDetailHero() {
-  const h = state.detail.hotel; const stars = h.star_rating ? "★".repeat(Math.min(5, Number(h.star_rating))) : "Chưa xếp hạng";
-  els.tripLink.href = safeUrl(h.url) || "#";
-  els.detailHero.innerHTML = `
-    <div class="detail-title"><div class="eyebrow">TRIP HOTEL ID · ${esc(h.trip_hotel_id)}</div><h1>${esc(text(h.name, `Khách sạn #${h.trip_hotel_id}`))}</h1><p>${esc(text(h.address))}</p>
-      <div class="detail-badges"><span>${esc(stars)}</span><span>${esc(text(h.hotel_type, "Chưa xác định loại hình"))}</span><span>${esc(text(h.location_name, "TP. Hồ Chí Minh"))}</span><span>${esc(statusLabel(h.detail_status))}</span></div>
-    </div>
-    <div><div class="detail-score"><div><strong>Điểm đánh giá</strong><span>${fmt(h.review_count)} lượt đánh giá</span></div><div class="score-large">${esc(h.review_score ?? "—")}</div></div>
-      <div class="detail-counts"><div><b>${fmt(h.image_count)}</b><small>ẢNH</small></div><div><b>${fmt(h.amenity_count)}</b><small>TIỆN NGHI</small></div><div><b>${fmt(h.room_count)}</b><small>LOẠI PHÒNG</small></div><div><b>${fmt(h.price_count)}</b><small>MỨC GIÁ</small></div><div><b>${fmt(h.policy_count)}</b><small>CHÍNH SÁCH</small></div><div><b>${fmt(h.nearby_count)}</b><small>LÂN CẬN</small></div></div>
+/* ------------------------------ tiện ích nhỏ ------------------------------ */
+const money = (value, currency) => value === null || value === undefined
+  ? "—"
+  : `${new Intl.NumberFormat("vi-VN", {maximumFractionDigits: 0}).format(Number(value))} ${esc(currency || "")}`.trim();
+
+function khoangCach(item) {
+  if (item.distance_km !== null && item.distance_km !== undefined) {
+    const km = Number(item.distance_km);
+    if (Number.isFinite(km)) {
+      return km < 1
+        ? `${Math.round(km * 1000)} m`
+        : `${km.toFixed(km >= 10 ? 0 : 1).replace(".", ",")} km`;
+    }
+  }
+  const raw = String(item.distance_text || "").trim();
+  const compact = raw.match(/(\d+(?:[.,]\d+)?)\s*(m|km)\b/i);
+  return compact ? `${compact[1]} ${compact[2].toLowerCase()}` : raw;
+}
+
+// Giờ nhận / trả phòng lấy từ mục chính sách checkInAndOut của Trip.com.
+function gioNhanTra(policies) {
+  const section = policies.find((row) => /checkin|check_in|nhan/i.test(String(row.policy_code || "")));
+  if (!section) return {};
+  const lines = String(section.description || "").split("\n");
+  const pick = (pattern) => {
+    const line = lines.find((one) => pattern.test(one));
+    const found = line && line.match(/\d{1,2}[:h]\d{2}/);
+    return found ? found[0] : null;
+  };
+  return {vao: pick(/nhận phòng|check[\s-]?in/i), ra: pick(/trả phòng|check[\s-]?out/i)};
+}
+
+/* ------------------------------ các khối ---------------------------------- */
+function tpGallery(images) {
+  if (!images.length) return '<div class="tp-empty">Chưa crawl được ảnh khách sạn.</div>';
+  const shown = images.slice(0, 5);
+  const extra = images.length - shown.length;
+  return `<div class="tp-gallery">${shown.map((image, index) => {
+    const url = safeUrl(image.url);
+    const caption = text(image.category_name || image.source_category, "");
+    return `<figure class="${index === 0 ? "main" : ""}">${url ? `<img src="${esc(url)}" loading="lazy" alt="${esc(caption || "Ảnh khách sạn")}">` : ""}${caption ? `<span class="cap">${esc(caption)}</span>` : ""}</figure>`;
+  }).join("")}<button class="tp-gallery-more" data-goto="tp-images">▧ Xem tất cả ${fmt(images.length)} ảnh${extra > 0 ? ` · +${fmt(extra)}` : ""}</button></div>`;
+}
+
+function tpHead(hotel) {
+  const stars = hotel.star_rating ? "★".repeat(Math.max(0, Math.min(5, Math.round(Number(hotel.star_rating))))) : "";
+  const noiChon = [text(hotel.location_name, ""), text(hotel.country_name, "")].filter(Boolean).join(", ");
+  const toaDo = hotel.latitude && hotel.longitude ? `<span class="coord">${esc(hotel.latitude)}, ${esc(hotel.longitude)}</span>` : "";
+  const diem = hotel.review_score === null || hotel.review_score === undefined ? "" : `
+    <div class="tp-score"><div class="txt"><b>${Number(hotel.review_score) >= 9 ? "Tuyệt vời" : Number(hotel.review_score) >= 8 ? "Rất tốt" : "Điểm đánh giá"}</b><span>${fmt(hotel.review_count)} đánh giá</span></div>
+      <div class="num">${esc(hotel.review_score)}<small>/10</small></div></div>`;
+  return `<div class="tp-head"><div class="tp-head-main">
+      <div class="tp-kicker">${esc(text(hotel.hotel_type, "Khách sạn"))} · Trip ID ${esc(hotel.trip_hotel_id)}</div>
+      <h1>${esc(text(hotel.name, `Khách sạn #${hotel.trip_hotel_id}`))} ${stars ? `<span class="tp-stars" aria-label="${esc(hotel.star_rating)} sao">${stars}</span>` : ""}</h1>
+      ${hotel.local_name ? `<p class="tp-localname">${esc(hotel.local_name)}</p>` : ""}
+      <p class="tp-addr"><span class="tp-pin">●</span>${esc(text(hotel.address, "Chưa có địa chỉ"))}${noiChon ? ` · ${esc(noiChon)}` : ""}${toaDo}</p>
+    </div>${diem}</div>`;
+}
+
+function tpFacts(hotel, policies) {
+  const gio = gioNhanTra(policies);
+  const o = [];
+  const them = (nhan, giaTri) => { if (giaTri !== null && giaTri !== undefined && giaTri !== "") o.push(`<div>${esc(nhan)} <b>${esc(giaTri)}</b></div>`); };
+  them("Trip hotel ID", hotel.trip_hotel_id);
+  them("Loại hình", hotel.hotel_type);
+  them("Hạng sao", hotel.star_rating ? `${hotel.star_rating}${hotel.star_type ? ` (${hotel.star_type})` : ""}` : "");
+  them("Số phòng", hotel.hotel_room_count ? fmt(hotel.hotel_room_count) : "");
+  them("Khai trương", hotel.open_year);
+  them("Sửa chữa", hotel.renovated_year);
+  them("Nhận phòng", gio.vao);
+  them("Trả phòng", gio.ra);
+  them("Trạng thái detail", statusLabel(hotel.detail_status));
+  return `<div class="tp-facts">${o.join("")}</div>`;
+}
+
+function tpNav(muc) {
+  return `<nav class="tp-nav" id="tp-nav">${muc.map((one, index) =>
+    `<button data-goto="${esc(one.id)}"${index === 0 ? ' class="active"' : ""}>${esc(one.ten)}</button>`).join("")}</nav>`;
+}
+
+function tpAbout(hotel) {
+  const phu = [
+    hotel.zone_name ? `Khu vực: ${hotel.zone_name}` : "",
+    hotel.traffic_desc ? `Giao thông: ${hotel.traffic_desc}` : "",
+  ].filter(Boolean).join(" · ");
+  return `<div class="tp-about">
+      <h2>Thông tin nổi bật</h2>
+      ${phu ? `<div class="labels">${esc(phu)}</div>` : ""}
+      <div class="body">${esc(text(hotel.description, "Chưa crawl được phần mô tả."))}</div>
     </div>`;
 }
 
-async function activateSection(section) {
-  document.querySelectorAll("#detail-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.section === section));
-  els.detailContent.innerHTML = '<div class="detail-loading"><span class="page-loading"><span></span></span>Đang tải phân mục...</div>';
-  try {
-    if (section === "overview") return renderOverview();
-    if (section === "translations") return renderTranslations();
-    if (!state.sections[section]) state.sections[section] = await api(`/api/hotels/${state.hotelId}/${section}?locale=${state.locale}`);
-    renderSection(section, state.sections[section]);
-  } catch (error) { els.detailContent.innerHTML = `<div class="error-box">${esc(error.message)}</div>`; }
+function giaThapNhat(prices) {
+  const hopLe = prices.filter((one) => !one.is_sold_out && one.price !== null && one.price !== undefined && Number.isFinite(Number(one.price)));
+  return hopLe.sort((a, b) => Number(a.price) - Number(b.price))[0] || null;
 }
 
-function heading(title, subtitle, count = null) {
-  return `<div class="section-heading"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div>${count === null ? "" : `<b>${fmt(count)} mục</b>`}</div>`;
+function tpBookingSummary(prices, hotelUrl) {
+  const gia = giaThapNhat(prices);
+  const link = safeUrl(hotelUrl);
+  return `<aside class="tp-booking-card">
+    <div class="tp-booking-label">Giá tham khảo thấp nhất</div>
+    ${gia ? `<div class="tp-booking-price">${money(gia.price, gia.currency)}<small>/ phòng / đêm</small></div>
+      <div class="tp-booking-date">${esc(text(gia.check_in, "Ngày nhận phòng"))} → ${esc(text(gia.check_out, "Ngày trả phòng"))}</div>`
+      : '<div class="tp-booking-missing">Chưa có giá động cho ngày đang chọn</div>'}
+    <button class="tp-primary" data-goto="tp-rooms">Xem phòng trống</button>
+    ${link ? `<a class="tp-source-link" href="${esc(link)}" target="_blank" rel="noopener">Mở khách sạn gốc ↗</a>` : ""}
+    <p>Dữ liệu hiển thị từ lần crawl gần nhất; giá thực tế có thể thay đổi.</p>
+  </aside>`;
 }
 
-function renderOverview() {
-  const h = state.detail.hotel;
-  els.detailContent.innerHTML = `${heading("Tổng quan khách sạn", "Thông tin chính đã chuẩn hóa từ dữ liệu crawl")}
-    <div class="section-grid"><div class="info-card"><h3>Thông tin định danh</h3><div class="kv-grid">
-      <div>Database ID</div><div>${esc(h.id)}</div><div>Trip hotel ID</div><div>${esc(h.trip_hotel_id)}</div><div>Loại hình</div><div>${esc(text(h.hotel_type))}</div><div>Hạng sao</div><div>${esc(text(h.star_rating))}</div><div>Điểm đánh giá</div><div>${esc(text(h.review_score))} / 10 (${fmt(h.review_count)} lượt)</div><div>Location ID</div><div>${esc(text(h.location_id))}</div>
-    </div></div><div class="info-card"><h3>Vị trí và thời gian</h3><div class="kv-grid">
-      <div>Khu vực</div><div>${esc(text(h.location_name))}</div><div>Quốc gia</div><div>${esc(text(h.country_code))}</div><div>Vĩ độ</div><div>${esc(text(h.latitude))}</div><div>Kinh độ</div><div>${esc(text(h.longitude))}</div><div>Ghi nhận đầu</div><div>${esc(text(h.first_seen_at))}</div><div>Cập nhật cuối</div><div>${esc(text(h.last_seen_at))}</div>
-    </div></div></div><div class="info-card" style="margin-top:12px"><h3>Mô tả</h3><div class="description">${esc(text(h.description))}</div></div>`;
+function tpOffers(offers, hotelUrl) {
+  const link = safeUrl(hotelUrl);
+  if (!offers.length) return `<div class="tp-no-rate"><span>Chưa có gói giá động cho phòng này.</span>${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">Kiểm tra phòng ↗</a>` : ""}</div>`;
+  return `<table class="tp-offers"><thead><tr>
+      <th>Lựa chọn phòng</th><th>Quyền lợi</th><th>Sức chứa</th><th class="right">Giá hôm nay</th><th></th>
+    </tr></thead><tbody>${offers.map((offer) => {
+    const tags = [
+      offer.breakfast_included ? '<span class="tp-tag ok">Có bữa sáng</span>' : '<span class="tp-tag no">Không bữa sáng</span>',
+      offer.free_cancellation ? '<span class="tp-tag ok">Hủy miễn phí</span>' : '<span class="tp-tag no">Không hoàn hủy</span>',
+      offer.is_sold_out ? '<span class="tp-tag sold">Hết phòng</span>' : "",
+    ].join("");
+    const them = [
+      offer.total_price !== null && offer.total_price !== undefined ? `Tổng ${money(offer.total_price, offer.currency)}` : "",
+      offer.taxes_fees !== null && offer.taxes_fees !== undefined ? `thuế/phí ${money(offer.taxes_fees, offer.currency)}` : "",
+    ].filter(Boolean).join(" · ");
+    return `<tr>
+        <td><b>${esc(text(offer.price_type, `Gói #${offer.id}`))}</b><small>${esc(text(offer.check_in, "—"))} → ${esc(text(offer.check_out, "—"))}</small></td>
+        <td>${tags}</td>
+        <td><span class="tp-guests">●●</span><small>Ghi nhận ${esc(text(offer.captured_date, "—"))}</small></td>
+        <td class="price">${money(offer.price, offer.currency)}${them ? `<small>${esc(them)}</small>` : ""}</td>
+        <td class="action">${offer.is_sold_out ? '<button disabled>Hết phòng</button>' : link ? `<a href="${esc(link)}" target="_blank" rel="noopener">Chọn</a>` : '<button disabled>Chọn</button>'}</td>
+      </tr>`;
+  }).join("")}</tbody></table>`;
 }
 
-function renderTranslations() {
-  const translations = state.detail.translations;
-  els.detailContent.innerHTML = `${heading("Nội dung tiếng Việt / tiếng Anh", "Mỗi ngôn ngữ được lưu thành một bản dịch riêng", translations.length)}<div class="section-grid">${translations.map((item) => `<article class="translation-card"><header><h3>${esc(text(item.name))}</h3><span class="locale-pill">${esc(item.locale)}</span></header><address>${esc(text(item.address))}</address><div class="kv-grid"><div>Loại hình</div><div>${esc(text(item.hotel_type))}</div><div>Crawl lúc</div><div>${esc(text(item.crawled_at))}</div></div><p class="description">${esc(text(item.description))}</p></article>`).join("")}</div>`;
+function tpRooms(rooms, prices, hotelUrl) {
+  if (!rooms.length) return '<div class="tp-empty">Chưa crawl được dữ liệu phòng.</div>';
+  const theoPhong = new Map();
+  for (const price of prices) {
+    if (!theoPhong.has(price.room_type_id)) theoPhong.set(price.room_type_id, []);
+    theoPhong.get(price.room_type_id).push(price);
+  }
+  return rooms.map((room) => {
+    const anh = safeUrl(room.images?.[0]?.url);
+    const tienNghi = (room.amenities || []).map((one) => text(one.amenity_name, "")).filter(Boolean);
+    const meta = [
+      text(room.bed_type, room.bed_count ? `${room.bed_count} giường` : ""),
+      room.area_text || (room.area_sqm ? `${room.area_sqm} m²` : ""),
+      room.guest_text || (room.max_occupancy ? `Tối đa ${room.max_occupancy} khách` : ""),
+      room.bedroom_count ? `${room.bedroom_count} phòng ngủ` : "",
+      room.bathroom_count ? `${room.bathroom_count} phòng tắm` : "",
+      room.view_name || "",
+      room.smoking_policy || "",
+      room.wifi ? "Wi-Fi" : "",
+      room.extra_bed_policy || "",
+    ].filter(Boolean);
+    return `<article class="tp-room">
+        <div class="tp-room-info">
+          <div>${anh ? `<img src="${esc(anh)}" loading="lazy" alt="${esc(text(room.name, "Phòng"))}">` : '<div class="tp-room-noimg">Chưa có ảnh phòng</div>'}
+            ${room.images?.length ? `<div class="tp-room-photo-count">▧ ${fmt(room.images.length)} ảnh</div>` : ""}</div>
+          <div>
+            <h3>${esc(text(room.name, `Phòng #${room.trip_room_id || room.id}`))}</h3>
+            <div class="tp-room-meta">${meta.map((one) => `<span>${esc(one)}</span>`).join("")}</div>
+            ${tienNghi.length ? `<div class="tp-room-am">${tienNghi.slice(0, 8).map((one) => `<span>✓ ${esc(one)}</span>`).join("")}${tienNghi.length > 8 ? `<span class="more-am">+${fmt(tienNghi.length - 8)} tiện nghi</span>` : ""}</div>` : '<div class="tp-room-am muted">Chưa có tiện nghi phòng.</div>'}
+          </div>
+        </div>
+        <div class="tp-room-rates">${tpOffers(theoPhong.get(room.id) || [], hotelUrl)}</div>
+      </article>`;
+  }).join("");
 }
 
-function renderSection(section, payload) {
-  if (section === "images") return renderImages(payload.items);
-  if (section === "amenities") {
-    renderAmenities(payload.items);
-    const unavailable = new Set(payload.items.filter(item => item.is_available === false).map(item => text(item.amenity_name)));
-    for (const chip of els.detailContent.querySelectorAll('.amenity-chip')) {
-      const nameNode = chip.firstChild;
-      if (nameNode && unavailable.has(nameNode.textContent)) {
-        const struck = document.createElement('s');
-        struck.textContent = nameNode.textContent;
-        chip.replaceChild(struck, nameNode);
-        chip.title = 'Không được cung cấp';
+function tpAmenities(items) {
+  if (!items.length) return '<div class="tp-empty">Chưa crawl được tiện nghi.</div>';
+  const nhom = new Map();
+  for (const item of items) {
+    const key = text(item.category, "Khác");
+    if (!nhom.has(key)) nhom.set(key, []);
+    nhom.get(key).push(item);
+  }
+  return [...nhom].map(([ten, ds]) => `<div class="tp-am-group">
+      <h3>${esc(ten)} <small>(${fmt(ds.length)})</small></h3>
+      <div class="tp-chips">${ds.map((one) => {
+    const lop = ["tp-chip", one.is_highlight ? "hi" : "", one.is_available === false ? "off" : ""].filter(Boolean).join(" ");
+    const phu = one.fee_label || one.free_type || "";
+    return `<span class="${lop}"${one.is_available === false ? ' title="Không được cung cấp"' : ""}><i>${one.is_available === false ? "×" : "✓"}</i>${esc(text(one.amenity_name, "—"))}${phu ? `<em>${esc(phu)}</em>` : ""}</span>`;
+  }).join("")}</div></div>`).join("");
+}
+
+function policyText(value) {
+  const holder = document.createElement("div");
+  holder.innerHTML = String(value ?? "").replace(/<\/(p|li)>/gi, "\n").replace(/<br\s*\/?\s*>/gi, "\n");
+  return holder.textContent.replace(/\n\s*\n+/g, "\n").trim();
+}
+
+function tpPolicies(items) {
+  if (!items.length) return '<div class="tp-empty">Chưa crawl được chính sách.</div>';
+  return items.map((one) => `<div class="tp-policy">
+      <h3>${esc(text(one.title, one.policy_code))}<span class="code">${esc(text(one.policy_code, ""))}</span></h3>
+      <div class="body">${esc(text(policyText(one.description), "Không có nội dung."))}</div>
+    </div>`).join("");
+}
+
+function tpNearby(items) {
+  if (!items.length) return '<div class="tp-empty">Chưa crawl được địa điểm lân cận.</div>';
+  const nhom = new Map();
+  for (const item of items) {
+    const key = text(item.category_name || item.category_code, "Khác");
+    if (!nhom.has(key)) nhom.set(key, []);
+    nhom.get(key).push(item);
+  }
+
+  const iconFor = (name) => {
+    const value = String(name || "").toLowerCase();
+    if (/transport|giao thông|ga tàu|metro/.test(value)) return "&#128646;";
+    if (/shopping|mua sắm|shop/.test(value)) return "&#128717;";
+    return "&#9679;";
+  };
+  const renderRow = (one) => {
+    const name = text(one.name, "—");
+    const note = text(one.description, "");
+    return `<li>
+      <span class="tp-place"><b title="${esc(name)}">${esc(name)}</b>${note ? `<span class="geo" title="${esc(note)}">${esc(note)}</span>` : ""}</span>
+      <span class="km">${esc(khoangCach(one))}</span>
+    </li>`;
+  };
+
+  return `<div class="tp-loc">${[...nhom].map(([ten, ds]) => {
+    ds.sort((a, b) => (a.distance_km ?? 9999) - (b.distance_km ?? 9999));
+    const visible = ds.slice(0, 6);
+    const hidden = ds.slice(6);
+    return `<section class="tp-loc-card">
+      <header class="tp-loc-head">
+        <span class="tp-loc-icon" aria-hidden="true">${iconFor(ten)}</span>
+        <div><h3>${esc(ten)}</h3><p>${fmt(ds.length)} địa điểm gần khách sạn</p></div>
+      </header>
+      <ul>${visible.map(renderRow).join("")}</ul>
+      ${hidden.length ? `<details class="tp-loc-details"><summary>Xem thêm ${fmt(hidden.length)} địa điểm <span aria-hidden="true">⌄</span></summary><ul>${hidden.map(renderRow).join("")}</ul></details>` : ""}
+    </section>`;
+  }).join("")}</div>`;
+}
+
+const ANH_MOI_LAN = 60;
+
+function tpImages(items, gioiHan = ANH_MOI_LAN) {
+  if (!items.length) return '<div class="tp-empty">Chưa crawl được ảnh.</div>';
+  const hien = items.slice(0, gioiHan);
+  const conLai = items.length - hien.length;
+  return `<div class="image-grid">${hien.map((one) => {
+    const url = safeUrl(one.url);
+    return `<figure class="image-card">${url ? `<img src="${esc(url)}" loading="lazy" alt="Ảnh khách sạn">` : ""}<span>${esc(text(one.category_name || one.source_category, "Khác"))}</span></figure>`;
+  }).join("")}</div>${conLai > 0 ? `<button class="ghost-button" id="tp-them-anh" style="margin-top:12px">Hiện thêm ${fmt(Math.min(conLai, ANH_MOI_LAN))} ảnh (còn ${fmt(conLai)})</button>` : ""}`;
+}
+
+function tpTranslations(rows) {
+  if (!rows.length) return '<div class="tp-empty">Chưa có bản dịch nào.</div>';
+  return `<div class="table-wrap"><table class="simple-table"><thead><tr>
+      <th>Ngôn ngữ</th><th>Tên</th><th>Tên bản địa</th><th>Địa chỉ</th><th>Loại hình</th><th>Mô tả</th>
+    </tr></thead><tbody>${rows.map((row) => `<tr>
+      <td>${esc(row.locale)}</td><td>${esc(text(row.name, "—"))}</td><td>${esc(text(row.local_name, "—"))}</td>
+      <td>${esc(text(row.address, "—"))}</td><td>${esc(text(row.hotel_type, "—"))}</td>
+      <td>${esc(String(text(row.description, "—")).slice(0, 300))}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+/* ------------------------------ lắp trang --------------------------------- */
+function renderTripDetail() {
+  const hotel = state.detail.hotel;
+  const s = state.sections;
+  els.tripLink.href = safeUrl(hotel.url) || "#";
+
+  const muc = [
+    {id: "tp-about", ten: "Tổng quan"},
+    {id: "tp-rooms", ten: `Phòng & giá (${fmt(s.rooms.length)})`},
+    {id: "tp-amenities", ten: `Tiện nghi (${fmt(s.amenities.length)})`},
+    {id: "tp-policies", ten: `Chính sách (${fmt(s.policies.length)})`},
+    {id: "tp-nearby", ten: `Vị trí lân cận (${fmt(s.nearby.length)})`},
+    {id: "tp-images", ten: `Ảnh (${fmt(s.images.length)})`},
+    {id: "tp-data", ten: "Dữ liệu thô"},
+  ];
+
+  els.detailBody.innerHTML = `
+    ${tpHead(hotel)}
+    ${tpGallery(s.images)}
+    ${tpNav(muc)}
+    <section class="tp-block tp-overview" id="tp-about">
+      <div class="tp-overview-main">${tpFacts(hotel, s.policies)}${tpAbout(hotel)}</div>
+      ${tpBookingSummary(s.prices, hotel.url)}
+    </section>
+    <section class="tp-block" id="tp-rooms"><div class="tp-section-title"><div><span>Phòng nghỉ</span><h2>Chọn phòng phù hợp</h2></div><small>${fmt(s.rooms.length)} loại phòng · ${fmt(s.prices.length)} mức giá</small></div>${tpRooms(s.rooms, s.prices, hotel.url)}</section>
+    <section class="tp-block tp-surface" id="tp-amenities"><h2>Tiện nghi &amp; dịch vụ</h2>${tpAmenities(s.amenities)}</section>
+    <section class="tp-block tp-surface" id="tp-policies"><h2>Chính sách khách sạn</h2>${tpPolicies(s.policies)}</section>
+    <section class="tp-block tp-surface" id="tp-nearby"><h2>Vị trí &amp; địa điểm lân cận</h2>${tpNearby(s.nearby)}</section>
+    <section class="tp-block tp-surface" id="tp-images"><h2>Thư viện ảnh <small>(${fmt(s.images.length)})</small></h2><div id="tp-anh">${tpImages(s.images, state.soAnh)}</div></section>
+    <section class="tp-block" id="tp-data"><h2>Đối chiếu dữ liệu đã lưu</h2>
+      <h3 style="font-size:15px;margin:0 0 8px">Bản dịch VI / EN</h3>
+      ${tpTranslations(state.detail.translations)}
+      <details style="margin-top:16px"><summary style="cursor:pointer;font-weight:600">Xem JSON bản ghi khách sạn</summary>
+        <pre class="raw-view">${esc(JSON.stringify({hotel, translations: state.detail.translations}, null, 2))}</pre>
+      </details>
+    </section>`;
+
+  const khungAnh = document.querySelector("#tp-anh");
+  khungAnh?.addEventListener("click", (event) => {
+    if (!event.target.closest("#tp-them-anh")) return;
+    state.soAnh += ANH_MOI_LAN;
+    khungAnh.innerHTML = tpImages(state.sections.images, state.soAnh);
+  });
+
+  const nav = document.querySelector("#tp-nav");
+  for (const button of els.detailBody.querySelectorAll("[data-goto]")) button.addEventListener("click", () => {
+    document.querySelector(`#${button.dataset.goto}`)?.scrollIntoView({behavior: "smooth", block: "start"});
+  });
+  theoDoiCuon(nav, muc);
+}
+
+// Tô sáng mục đang xem khi cuộn trang.
+function theoDoiCuon(nav, muc) {
+  if (typeof IntersectionObserver !== "function") return;
+  const doi = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      for (const button of nav.querySelectorAll("button")) {
+        button.classList.toggle("active", button.dataset.goto === entry.target.id);
       }
     }
-    return;
+  }, {rootMargin: "-56px 0px -70% 0px", threshold: 0});
+  for (const one of muc) {
+    const node = document.querySelector(`#${one.id}`);
+    if (node) doi.observe(node);
   }
-  if (section === "rooms") return renderRooms(payload.items);
-  if (section === "prices") return renderPrices(payload.items);
-  if (section === "policies") return renderPolicies(payload.items);
-  if (section === "nearby") return renderNearby(payload.items);
-  if (section === "raw") return renderRaw(payload);
-}
-
-function renderImages(items) {
-  els.detailContent.innerHTML = `${heading("Thư viện ảnh", "Ảnh khách sạn được phân loại theo album Trip.com", items.length)}<div class="image-grid">${items.map((item) => { const url=safeUrl(item.url); return `<figure class="image-card">${url ? `<img src="${esc(url)}" alt="${esc(text(item.image_title, item.category_name || "Ảnh khách sạn"))}" loading="lazy">` : ""}<span>${esc(text(item.category_name || item.source_category, "Khác"))}</span></figure>`; }).join("")}</div>${items.length ? "" : '<div class="empty-view"><b>Chưa có ảnh</b></div>'}`;
-}
-
-function renderAmenities(items) {
-  const groups = new Map();
-  for (const item of items) { const category=text(item.category,"Khác"); if (!groups.has(category)) groups.set(category,[]); groups.get(category).push(item); }
-  els.detailContent.innerHTML = `${heading("Tiện nghi & dịch vụ", "Các tiện nghi nổi bật, loại phí và thông tin bổ sung", items.length)}${[...groups].map(([category, values]) => `<div class="group"><h3 class="group-title">${esc(category)} <small>(${fmt(values.length)})</small></h3><div class="chip-list">${values.map((item) => `<span class="amenity-chip ${item.is_highlight ? "highlight" : ""}">${esc(text(item.amenity_name))}${item.free_type ? `<em>${esc(item.free_type)}</em>` : ""}${item.fee_label ? `<em>${esc(item.fee_label)}</em>` : ""}</span>`).join("")}</div></div>`).join("") || '<div class="empty-view"><b>Chưa có tiện nghi</b></div>'}`;
-}
-
-function renderRooms(items) {
-  els.detailContent.innerHTML = `${heading("Phòng và tiện nghi phòng", "Tên phòng, giường, diện tích, sức chứa, ảnh và dịch vụ đi kèm", items.length)}<div class="room-list">${items.map((room) => {
-    const mainImage=safeUrl(room.images?.[0]?.url); const amenities=(room.amenities || []).map((a) => text(a.amenity_name,a.amenity_key)).filter(Boolean);
-    return `<article class="room-card"><div class="room-media">${mainImage ? `<img src="${esc(mainImage)}" alt="${esc(text(room.name,"Phòng"))}" loading="lazy">` : '<div class="room-no-image">Chưa có ảnh phòng</div>'}</div><div class="room-body"><h3>${esc(text(room.name,`Phòng #${room.trip_room_id || room.id}`))}</h3><div class="room-meta"><span>${esc(text(room.bed_type,"Chưa rõ giường"))}</span><span>${esc(text(room.area_sqm,"—"))} m²</span><span>Tối đa ${esc(text(room.max_occupancy,"—"))} người</span><span>${esc(text(room.bedroom_count,"—"))} phòng ngủ</span><span>${esc(text(room.bathroom_count,"—"))} phòng tắm</span>${room.view_name ? `<span>${esc(room.view_name)}</span>` : ""}${room.smoking_policy ? `<span>${esc(room.smoking_policy)}</span>` : ""}</div><div class="room-amenities"><b>${fmt(amenities.length)} tiện nghi:</b> ${esc(amenities.slice(0,20).join(" · "))}${amenities.length>20 ? ` · +${fmt(amenities.length-20)} mục khác` : ""}</div>${room.images?.length>1 ? `<div class="room-images-mini">${room.images.slice(1,6).map((img) => `<img src="${esc(safeUrl(img.url))}" loading="lazy" alt="Ảnh phòng">`).join("")}</div>` : ""}</div></article>`;
-  }).join("")}</div>${items.length ? "" : '<div class="empty-view"><b>Chưa có dữ liệu phòng</b></div>'}`;
-}
-
-function renderPrices(items) {
-  els.detailContent.innerHTML = `${heading("Giá theo ngày và thị trường", "Giá VND/USD tách biệt với ngôn ngữ hiển thị", items.length)}<div class="table-wrap"><table class="simple-table"><thead><tr><th>Loại phòng</th><th>Loại giá</th><th>Check-in</th><th>Check-out</th><th>Giá</th><th>Thuế</th><th>Ngôn ngữ</th><th>Ngày ghi nhận</th></tr></thead><tbody>${items.map((item) => `<tr><td>${esc(text(item.room_name,item.room_type_id ? `Room #${item.room_type_id}`:"Toàn khách sạn"))}</td><td>${esc(item.price_type)}</td><td>${esc(item.check_in)}</td><td>${esc(item.check_out)}</td><td class="money">${item.price === null ? "NULL" : `${esc(new Intl.NumberFormat("vi-VN",{maximumFractionDigits:2}).format(Number(item.price)))} ${esc(item.currency)}`}</td><td>${item.tax_included === null ? "—" : item.tax_included ? "Đã gồm" : "Chưa gồm"}</td><td>${esc(item.language)}</td><td>${esc(item.captured_date)}</td></tr>`).join("")}</tbody></table></div>${items.length ? "" : '<div class="empty-view"><b>Chưa có dữ liệu giá</b></div>'}`;
-}
-
-function renderPolicies(items) {
-  els.detailContent.innerHTML = `${heading("Chính sách khách sạn", "Nhận/trả phòng, trẻ em, thú cưng, thanh toán và các quy định", items.length)}<div class="policy-list">${items.map((item) => `<article class="policy-item"><span class="policy-code">${esc(text(item.policy_code,"other"))}</span><h3>${esc(text(item.title,item.policy_code))}</h3><p>${esc(text(item.description))}</p></article>`).join("")}</div>${items.length ? "" : '<div class="empty-view"><b>Chưa có chính sách</b></div>'}`;
-}
-
-function renderNearby(items) {
-  const groups = new Map(); for (const item of items) { const key=text(item.category_name || item.category_code,"Khác"); if (!groups.has(key)) groups.set(key,[]); groups.get(key).push(item); }
-  els.detailContent.innerHTML = `${heading("Vị trí và địa điểm lân cận", "Giao thông, mua sắm, điểm nổi bật và khoảng cách", items.length)}${[...groups].map(([category,values]) => `<div class="group"><h3 class="group-title">${esc(category)}</h3><div class="nearby-list">${values.map((item) => `<article class="nearby-item"><h3>${esc(text(item.name))}</h3><p>${esc(text(item.description,""))}</p><div class="nearby-meta"><span>${esc(text(item.distance_text,item.distance_km !== null ? `${item.distance_km} km`:"Chưa rõ khoảng cách"))}</span>${item.arrival_type ? `<span>${esc(item.arrival_type)}</span>` : ""}</div></article>`).join("")}</div></div>`).join("") || '<div class="empty-view"><b>Chưa có địa điểm lân cận</b></div>'}`;
-}
-
-function renderRaw(payload) {
-  els.detailContent.innerHTML = `${heading("Dữ liệu thô", "Raw JSON được giữ lại để kiểm tra và tái phân tích")}<pre class="raw-view">${esc(JSON.stringify({hotel:payload.hotel, translations:payload.translations},null,2))}</pre>`;
 }
 
 let searchTimer;
 els.search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer=setTimeout(() => {state.search=els.search.value.trim(); state.offset=0; loadHotels();},350); });
-for (const [element,key] of [[els.locale,"locale"],[els.currency,"currency"],[els.star,"star"],[els.status,"status"],[els.sort,"sort"]]) element.addEventListener("change", () => {state[key]=element.value; state.offset=0; loadHotels();});
+for (const [element,key] of [[els.currency,"currency"],[els.star,"star"],[els.status,"status"],[els.sort,"sort"],[els.city,"city"]]) element.addEventListener("change", () => {state[key]=element.value; state.offset=0; capNhatTieuDe(); loadHotels();});
+// Đổi ngôn ngữ thì nạp lại tên thành phố theo đúng thứ tiếng đó.
+els.locale.addEventListener("change", () => {state.locale=els.locale.value; state.offset=0; loadCities(); loadHotels();});
 els.prev.addEventListener("click", () => {state.offset=Math.max(0,state.offset-state.limit); loadHotels(); window.scrollTo({top:0,behavior:"smooth"});});
 els.next.addEventListener("click", () => {state.offset+=state.limit; loadHotels(); window.scrollTo({top:0,behavior:"smooth"});});
-$("#refresh-hotels").addEventListener("click", () => {loadHealth(); loadHotels(); showToast("Đang làm mới dữ liệu từ PostgreSQL.");});
+$("#refresh-hotels").addEventListener("click", () => {loadHealth(); loadCities(); loadHotels(); showToast("Đang làm mới dữ liệu từ PostgreSQL.");});
 $("#back-to-list").addEventListener("click", () => closeHotel());
 els.detailLocale.addEventListener("change", async () => {state.locale=els.detailLocale.value; els.locale.value=state.locale; state.sections={}; await openHotel(state.hotelId,false);});
-els.tabs.addEventListener("click", (event) => {const button=event.target.closest("button[data-section]"); if (button) activateSection(button.dataset.section);});
 window.addEventListener("popstate", () => {const id=new URLSearchParams(location.search).get("hotel"); if (id) openHotel(id,false); else closeHotel(false);});
 
 async function init() {
-  await Promise.all([loadHealth(), loadHotels()]);
+  await Promise.all([loadHealth(), loadCities(), loadHotels()]);
   const id = new URLSearchParams(location.search).get("hotel"); if (id) await openHotel(id,false);
 }
 init().catch((error) => {els.error.textContent=error.message; els.error.classList.remove("hidden");});

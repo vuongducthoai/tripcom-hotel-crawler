@@ -41,6 +41,70 @@ TIMEZONE = os.getenv("TIMEZONE", "Asia/Ho_Chi_Minh")
 VIEWPORT = {"width": 1440, "height": 900}
 PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "60000"))
 
+
+def _parse_proxy_line(line: str) -> tuple[str, str, str]:
+    """Nhận 'host:port:user:pass' (định dạng mkvn cấp), 'host:port',
+    hoặc URL 'http://user:pass@host:port'. Trả (server, user, pass)."""
+    line = line.strip()
+    if "://" in line or "@" in line:
+        from urllib.parse import unquote, urlsplit
+        u = urlsplit(line if "://" in line else f"http://{line}")
+        return (f"{u.scheme}://{u.hostname}:{u.port}",
+                unquote(u.username or ""), unquote(u.password or ""))
+    parts = line.split(":")
+    if len(parts) == 2:
+        return f"http://{parts[0]}:{parts[1]}", "", ""
+    if len(parts) >= 4:
+        host, port, user = parts[0], parts[1], parts[2]
+        return f"http://{host}:{port}", user, ":".join(parts[3:])
+    raise ValueError(f"TRIP_PROXY không đúng định dạng host:port:user:pass — nhận được {line!r}")
+
+
+def browser_proxy() -> dict[str, str] | None:
+    """Playwright proxy for persistent Chromium contexts, or None when disabled.
+
+    Ưu tiên TRIP_PROXY=host:port:user:pass (dán nguyên chuỗi nhà cung cấp cấp);
+    không có thì đọc TRIP_PROXY_SERVER / _USERNAME / _PASSWORD như cũ.
+    """
+    if os.getenv("TRIP_PROXY_ENABLED", "false").strip().lower() != "true":
+        return None
+    line = os.getenv("TRIP_PROXY", "").strip()
+    if line:
+        server, username, password = _parse_proxy_line(line)
+    else:
+        server = os.getenv("TRIP_PROXY_SERVER", "").strip()
+        username = os.getenv("TRIP_PROXY_USERNAME", "").strip()
+        password = os.getenv("TRIP_PROXY_PASSWORD", "").strip()
+    if not server:
+        if username or password:
+            raise ValueError("TRIP_PROXY_SERVER chưa được cấu hình.")
+        return None
+    if bool(username) != bool(password):
+        raise ValueError("TRIP_PROXY_USERNAME và TRIP_PROXY_PASSWORD phải đi cùng nhau.")
+    proxy = {"server": server if "://" in server else f"http://{server}"}
+    if username:
+        proxy.update(username=username, password=password)
+    return proxy
+
+
+def httpx_proxy_url() -> str | None:
+    """Return the configured proxy as an authenticated URL for httpx."""
+    proxy = browser_proxy()
+    if not proxy:
+        return None
+    server = proxy["server"]
+    username = proxy.get("username")
+    if not username:
+        return server
+
+    from urllib.parse import quote, urlsplit, urlunsplit
+
+    parsed = urlsplit(server)
+    password = proxy.get("password", "")
+    auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
+    return urlunsplit((parsed.scheme, auth + parsed.netloc, parsed.path,
+                       parsed.query, parsed.fragment))
+
 # ---------------------------------------------------------------- tốc độ
 # Giữ chậm. Bị block một lần là mất cả buổi để gỡ.
 MIN_DELAY = float(os.getenv("MIN_DELAY", "1.5"))
