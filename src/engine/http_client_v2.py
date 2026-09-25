@@ -157,6 +157,66 @@ class FastHttpClient:
         self._record_error(url, None, final_err, max_attempts)
         return None, final_err
 
+    async def get_nearby_places(
+        self,
+        hotel_id: str | int,
+        city_id: int | None = None,
+        province_id: int | None = None,
+        lat: float | None = None,
+        lng: float | None = None,
+        locale: str = "vi-VN",
+        currency: str = "VND",
+        referer: str = "",
+        timeout: float = 15.0,
+    ) -> tuple[dict | None, str | None]:
+        """Fetch full categorized nearby places via SOA2 ctGetNearbyPlaceInfo endpoint.
+        
+        Returns:
+            (response_dict, error_message)
+        """
+        host = "www.trip.com" if locale.lower().startswith("en") else "vn.trip.com"
+        url = f"https://{host}/restapi/soa2/28820/ctGetNearbyPlaceInfo"
+
+        post_headers = {
+            **CHROME_HEADERS,
+            "Content-Type": "application/json;charset=UTF-8",
+            "Accept": "application/json, text/plain, */*",
+            "Origin": f"https://{host}",
+            "Referer": referer or f"https://{host}/hotels/detail/?hotelId={hotel_id}",
+            "cookieorigin": f"https://{host}",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+
+        payload: dict[str, Any] = {
+            "masterHotelId": int(hotel_id),
+            "cityId": int(city_id or 0),
+            "provinceId": int(province_id or 0),
+        }
+        if lat is not None and lng is not None:
+            payload["coordinate"] = {"lat": float(lat), "lng": float(lng)}
+
+        proxy_url = resolve_proxy_url(self.base_proxy, hotel_id, 1)
+        try:
+            async with AsyncSession(
+                impersonate=self.impersonate,
+                proxy=proxy_url,
+                timeout=timeout,
+            ) as session:
+                resp = await session.post(url, json=payload, headers=post_headers)
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                        if isinstance(data, dict) and data.get("data", {}).get("placeInfoList"):
+                            return data, None
+                        return None, "Empty placeInfoList"
+                    except Exception as exc:
+                        return None, f"JSON parse error: {exc}"
+                return None, f"HTTP {resp.status_code} ({resp.text[:100]})"
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+
     def _record_error(self, url: str, status: int | None, message: str, attempt: int) -> None:
         self.errors.append({
             "url": url,
@@ -165,3 +225,4 @@ class FastHttpClient:
             "attempt": attempt,
             "timestamp": time.time(),
         })
+
