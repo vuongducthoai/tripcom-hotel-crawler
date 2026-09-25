@@ -528,13 +528,11 @@ def read_ids(args) -> list[str]:
         return [str(h["trip_hotel_id"]) for h in payload.get("hotels") or []]
     if getattr(args, "from_db", False):
         from crawl_detail import targets_from_db
-        targets = targets_from_db(
-            city_id=getattr(args, "city_id", None),
-            limit=getattr(args, "limit", None),
+        targets, _ = targets_from_db(
+            locale=getattr(args, "locale", "vi-VN") or "vi-VN",
             missing_only=getattr(args, "missing_only", False),
-            start_after=getattr(args, "start_after", None),
         )
-        return [str(t["hotel_id"]) for t in targets]
+        return [str(t["trip_hotel_id"]) for t in targets]
     raise SystemExit("Cần --hotel-id, --ids-file, --file hoặc --from-db")
 
 
@@ -582,22 +580,16 @@ async def crawl_one_fast(
     from ssr_extractor import parse_hotel_html
 
     hotel_id = str(target["trip_hotel_id"])
-    url = target.get("detail_url") or detail_url(hotel_id, locale, currency, checkin, checkout)
+    url = target.get("detail_url") or target.get("url") or detail_url(hotel_id, locale, currency, checkin, checkout)
 
     start_t = time.monotonic()
-    html, fetch_err = await client.get_detail_html(
-        hotel_id=hotel_id,
-        checkin=checkin,
-        checkout=checkout,
-        locale=locale,
-        currency=currency,
-    )
+    html, fetch_err = await client.get_hotel_page(url, hotel_id=hotel_id)
     fetch_sec = round(time.monotonic() - start_t, 2)
 
     if fetch_err or not html:
         fail_row = {
             "trip_hotel_id": hotel_id,
-            "hotel_name": target.get("hotel_name", ""),
+            "hotel_name": target.get("name") or target.get("hotel_name", ""),
             "detail_url": url,
             "success": False,
             "error": fetch_err or "Empty response",
@@ -619,22 +611,31 @@ async def crawl_one_fast(
         return fail_row
 
     parsed = parse_hotel_html(
-        html=html,
+        html_text=html,
         hotel_id=hotel_id,
         url=url,
         currency=currency,
         locale=locale,
-        checkin=checkin,
-        checkout=checkout,
     )
     normalized = parsed["normalized"]
+    packets = parsed.get("packets") or []
     normalized["fetch_time_sec"] = fetch_sec
-    normalized["hotel_name"] = normalized.get("hotel_name") or target.get("hotel_name", "")
+    normalized["hotel_name"] = normalized.get("name") or target.get("name") or target.get("hotel_name", "")
+    normalized["check_in"] = checkin
+    normalized["check_out"] = checkout
+    normalized["crawled_at"] = datetime.now().isoformat(timespec="seconds")
+    normalized["success"] = bool(normalized.get("name") or normalized.get("images") or normalized.get("amenities"))
+    normalized["rooms_missing"] = not bool(normalized.get("rooms"))
 
     folder = market_raw_dir(locale, currency)
     folder.mkdir(parents=True, exist_ok=True)
     raw_path = folder / f"{hotel_id}.json"
-    raw_store.write(raw_path, parsed)
+    raw_store.write(raw_path, {
+        "target": target,
+        "url": url,
+        "normalized": normalized,
+        "responses": packets,
+    })
 
     return normalized
 
@@ -669,25 +670,17 @@ async def run_curl_async(args) -> int:
         source = f"single:{args.hotel_id}"
         targets = [{"trip_hotel_id": str(args.hotel_id), "hotel_name": "", "detail_url": None}]
     elif args.file:
-        source = str(args.file)
-        targets = targets_from_file(args.file)
+        targets, source = targets_from_file(args.file)
     elif args.from_db:
-        source = f"db:city_{args.city_id or 'all'}"
-        targets = targets_from_db(
-            city_id=args.city_id,
-            limit=None,
-            missing_only=args.missing_only,
-            start_after=args.start_after,
-        )
+        targets, source = targets_from_db(locale, missing_only=args.missing_only)
     elif args.ids_file and forced_ids:
         source = f"ids_file:{args.ids_file}"
         targets = [{"trip_hotel_id": hid, "hotel_name": "", "detail_url": None} for hid in sorted(forced_ids)]
     else:
         candidates = sorted(config.DATA_DIR.glob("api_hotels_*.json"), key=os.path.getmtime, reverse=True)
         if candidates:
-            source = str(candidates[0])
+            targets, source = targets_from_file(str(candidates[0]))
             print(f"Chọn tự động file tổng quan mới nhất: {source}")
-            targets = targets_from_file(source)
         else:
             print("Không tìm thấy file tổng quan api_hotels_*.json và không có cờ --from-db.")
             return 1
