@@ -341,10 +341,12 @@ async def main(args: argparse.Namespace) -> None:
             img_c = len(row.get("images") or [])
             amen_c = len(row.get("amenities") or [])
             room_c = len(row.get("rooms") or [])
+            pol_c = len(row.get("policies") or [])
+            place_c = len(row.get("nearby_places") or [])
 
             print(
                 f"[{index}/{len(targets)}] {target['trip_hotel_id']} {status} | "
-                f"ảnh={img_c}, tiện ích={amen_c}, phòng={room_c} ({sec}s)"
+                f"ảnh={img_c}, tiện ích={amen_c}, phòng={room_c}, chính sách={pol_c}, lân cận={place_c} ({sec}s)"
             )
 
             if crawled_count % config.CHECKPOINT_EVERY == 0:

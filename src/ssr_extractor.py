@@ -83,15 +83,29 @@ def extract_next_flight_chunks(scripts: list[str]) -> list[Any]:
             if isinstance(arg, list) and len(arg) >= 2:
                 payload = arg[1]
                 if isinstance(payload, str):
-                    # Check if string contains JSON lines (e.g. "1:HL[...]\n2:I{...}\n")
+                    clean_str = payload.strip()
+                    if clean_str.startswith(("{", "[")):
+                        try:
+                            chunks.append(json.loads(clean_str))
+                        except ValueError:
+                            pass
+                    # Also check if string contains Next.js flight JSON lines (e.g. "1:HL[...]\n2:I{...}\n")
                     for line in payload.splitlines():
                         line = line.strip()
-                        if not line or ":" not in line:
+                        if not line:
                             continue
-                        prefix, rest = line.split(":", 1)
-                        if rest.startswith(("{", "[")):
+                        if ":" in line:
+                            prefix, rest = line.split(":", 1)
+                            # Handle Next.js flight tag like "1:I{...}" or "b:HL[...]"
+                            rest_clean = rest.lstrip("HLIT")
+                            if rest_clean.startswith(("{", "[")):
+                                try:
+                                    chunks.append(json.loads(rest_clean))
+                                except ValueError:
+                                    pass
+                        elif line.startswith(("{", "[")):
                             try:
-                                chunks.append(json.loads(rest))
+                                chunks.append(json.loads(line))
                             except ValueError:
                                 pass
                 elif isinstance(payload, (dict, list)):
@@ -256,6 +270,13 @@ def parse_hotel_html(
                 "status": 200,
                 "response": room_obj,
             })
+            # Also emit canonical SOA2 envelope so v2_loader.py / v2.extract extracts rooms directly
+            packets.append({
+                "url": "https://vn.trip.com/restapi/soa2/33269/getHotelRoomListOversea",
+                "method": "EMBEDDED",
+                "status": 200,
+                "response": {"data": room_obj},
+            })
 
     # 5b. Schema V2 hotelDetailResponse block
     detail_block = extract_hotel_detail_response(html_text, flight_chunks)
@@ -266,6 +287,171 @@ def parse_hotel_html(
             "status": 200,
             "response": detail_block,
         })
+        # Bridge structured policies to embedded:hotel-policies so detail_extract.py captures them
+        policy_info = detail_block.get("hotelPolicyInfo")
+        if isinstance(policy_info, dict):
+            policy_lines = []
+            for sec_key, sec in policy_info.items():
+                if not isinstance(sec, dict):
+                    continue
+                title = sec.get("title")
+                if not title:
+                    continue
+                items = sec.get("content") or []
+                desc_parts = []
+                for item in items:
+                    if isinstance(item, dict):
+                        item_t = item.get("title")
+                        item_d = item.get("description")
+                        if item_t and item_d:
+                            desc_parts.append(f"{str(item_t).strip()} {str(item_d).strip()}")
+                        elif item_d:
+                            desc_parts.append(str(item_d).strip())
+                        elif item_t:
+                            desc_parts.append(str(item_t).strip())
+                cash_desc = sec.get("cashDesc")
+                if cash_desc:
+                    desc_parts.append(str(cash_desc).strip())
+                if desc_parts:
+                    policy_lines.append(str(title).strip())
+                    for dp in desc_parts:
+                        policy_lines.append(dp)
+            if policy_lines:
+                packets.append({
+                    "url": "embedded:hotel-policies",
+                    "method": "EMBEDDED",
+                    "status": 200,
+                    "response": {"text": "\n".join(policy_lines)},
+                })
+
+        # Bridge review ratings to getHotelCommentInfo SOA2 packet so Schema V2 extracts reviews
+        hotel_comment = detail_block.get("hotelComment")
+        if isinstance(hotel_comment, dict):
+            comm = hotel_comment.get("comment") if isinstance(hotel_comment.get("comment"), dict) else hotel_comment
+            score_val = comm.get("score")
+            if score_val is not None:
+                score_detail = comm.get("scoreDetail") or []
+                sub_scores = {}
+                for item in score_detail:
+                    if isinstance(item, dict):
+                        stype = str(item.get("showType") or "").lower()
+                        val = item.get("showScore")
+                        if val:
+                            try:
+                                sub_scores[stype] = float(str(val).replace(",", "."))
+                            except ValueError:
+                                pass
+                tags = []
+                for idx, q in enumerate(comm.get("quality") or []):
+                    if q:
+                        tags.append({"id": 1000 + idx, "name": str(q).strip(), "commentCount": 1, "type": 1})
+                try:
+                    rating_all = float(str(score_val).replace(",", "."))
+                except ValueError:
+                    rating_all = 0.0
+                try:
+                    total_count = int(comm.get("totalComment") or comm.get("totalCount") or 0)
+                except (ValueError, TypeError):
+                    total_count = 0
+                try:
+                    full_rating = int(comm.get("scoreMax") or 10)
+                except (ValueError, TypeError):
+                    full_rating = 10
+                review_payload = {
+                    "totalCount": total_count,
+                    "commentRating": {
+                        "fullRating": full_rating,
+                        "ratingAll": rating_all,
+                        "ratingLocation": sub_scores.get("location"),
+                        "ratingFacility": sub_scores.get("amenities"),
+                        "ratingService": sub_scores.get("service"),
+                        "ratingRoom": sub_scores.get("cleanliness"),
+                        "commentLevel": comm.get("scoreDescription"),
+                    },
+                    "commentTagList": tags,
+                }
+                packets.append({
+                    "url": "https://vn.trip.com/restapi/soa2/34308/getHotelCommentInfo",
+                    "method": "EMBEDDED",
+                    "status": 200,
+                    "response": {"data": review_payload},
+                })
+
+        # Bridge nearby places from placeInfo to ctGetNearbyPlaceInfo SOA2 packet
+        pos_info = detail_block.get("hotelPositionInfo") if isinstance(detail_block, dict) else None
+        place_info = (pos_info.get("placeInfo") if isinstance(pos_info, dict) else None) or detail_block.get("placeInfo")
+        if isinstance(place_info, dict):
+            pois = place_info.get("wholePoiInfoList") or place_info.get("poiList") or []
+            if pois:
+                places = []
+                around_pois = []
+                for item in pois:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        pid = int(item.get("poiId") or item.get("gsPoiId") or item.get("id") or 0)
+                    except (ValueError, TypeError):
+                        continue
+                    if not pid:
+                        continue
+                    name = item.get("poiName") or item.get("desc") or item.get("name")
+                    if not name:
+                        continue
+                    dist_str = str(item.get("distance") or item.get("distanceDesc") or "")
+                    m = re.search(r"(\d+(?:[.,]\d+)?)", dist_str)
+                    dist_km = None
+                    if m:
+                        val = float(m.group(1).replace(",", "."))
+                        dist_km = val / 1000.0 if ("m" in dist_str.lower() and "km" not in dist_str.lower()) else val
+                    dist_type = str(item.get("distType") or item.get("arrivalType") or "LINEAR_DISTANCE")
+                    p_type = int(item.get("poiType")) if str(item.get("poiType") or "").isdigit() else None
+                    desc_type = str(item.get("descWithType") or "")
+                    if ":" in desc_type:
+                        tag = desc_type.split(":", 1)[0].strip()
+                    else:
+                        tag = item.get("type") or (item.get("tagNames") or [None])[0]
+                    tags = [str(tag).strip()] if tag else []
+                    lat_val = item.get("lat")
+                    lng_val = item.get("lng")
+
+                    places.append({
+                        "id": pid,
+                        "name": str(name).strip(),
+                        "distance": dist_km,
+                        "distanceDesc": dist_str,
+                        "arrivalType": dist_type,
+                        "poiType": p_type,
+                        "lat": lat_val,
+                        "lng": lng_val,
+                        "tagNames": tags,
+                    })
+                    around_pois.append({
+                        "id": pid,
+                        "name": str(name).strip(),
+                        "distance": dist_km,
+                        "distanceDescText": dist_str,
+                        "sinkDistanceText": dist_str,
+                        "arrivalType": dist_type,
+                        "poiType": p_type,
+                        "lat": lat_val,
+                        "lng": lng_val,
+                        "tagNames": tags,
+                    })
+                if places:
+                    packets.append({
+                        "url": "https://vn.trip.com/restapi/soa2/28820/ctGetNearbyPlaceInfo",
+                        "method": "EMBEDDED",
+                        "status": 200,
+                        "response": {
+                            "data": {
+                                "placeInfoList": [{"id": 1, "name": "Lân cận", "places": places}],
+                                "aroundItemList": [{"id": "1", "typeName": "Lân cận", "poiInfoList": around_pois}],
+                            }
+                        },
+                    })
+
+
+
 
     # 6. Any additional packets (e.g. dynamic room list API call if enabled)
     if additional_packets:
