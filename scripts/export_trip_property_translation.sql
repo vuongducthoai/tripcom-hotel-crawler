@@ -20,8 +20,8 @@
 --
 -- section_type giữ NGUYÊN giá trị Trip.com trả về:
 --   POLICY      → tên key trong hotelPolicyInfo ('checkInAndOut', 'pet'…)
---   SURROUNDING → '<mã nhóm>_<tên nhóm theo ngôn ngữ đó>', giữ nguyên tên
---                  Trip.com trả về:  '2_Giao thông' (vi) / '2_Transport' (en).
+--   SURROUNDING → '<mã nhóm 2 chữ số>_<tên nhóm theo ngôn ngữ đó>', giữ nguyên
+--                  tên Trip.com trả về: '02_Giao thông' (vi) / '02_Transport' (en).
 --                  LƯU Ý ĐÃ BIẾT VÀ CHẤP NHẬN: Trip.com xếp nhóm khác nhau theo
 --                  ngôn ngữ (cùng khách sạn 118050925, bản EN có thêm nhóm
 --                  4 Dining mà bản VI không có), nên CÙNG MỘT row_uuid có thể
@@ -105,6 +105,14 @@ dia_diem AS (
       AND btrim(pi.name) !~* '^(size\?|n/?a|null|-+|\?+)$'
 ),
 
+-- Các mục chính sách KHÔNG xuất sang bảng của platform.
+--   credit — "Thanh toán tại khách sạn". Trip.com trả phần này chủ yếu bằng
+--            ảnh logo thẻ (Visa/Mastercard/Amex/Diners) mà mình không lưu,
+--            nên sau khi bỏ ảnh chỉ còn lại tiêu đề + "Tiền mặt" — thừa dữ
+--            liệu. Anh Thoại yêu cầu bỏ (2026-09-24).
+-- Thêm mã vào đây nếu sau này cần bỏ thêm mục khác.
+muc_bo_qua (ma) AS (VALUES ('credit')),
+
 -- Nội dung chính sách gom cả mục thành một dòng HTML:
 --   dòng có nhãn    → <p><strong>Nhận phòng</strong> 15:00</p>
 --   dòng không nhãn → gom chung vào <ul><li>…</li></ul>
@@ -162,12 +170,14 @@ rows AS (
            s.trip_hotel_id, 'POLICY', ps.section_code, ps.locale::text,
            'policy_title', ps.title, 2, ps.sort_order * 10
     FROM sel s JOIN v2.hotel_policy_sections ps ON ps.hotel_id = s.id
+    WHERE ps.section_code <> ALL (SELECT ma FROM muc_bo_qua)
 
     UNION ALL
     SELECT md5(h.trip_hotel_id || ':POLICY:' || h.section_code)::uuid,
            h.trip_hotel_id, 'POLICY', h.section_code, h.locale::text,
            'policy_content', h.noi_dung, 2, h.sort_order * 10 + 1
     FROM chinh_sach_html h
+    WHERE h.section_code <> ALL (SELECT ma FROM muc_bo_qua)
 
     -- ------------------------------------------------ SURROUNDING
     UNION ALL
@@ -175,8 +185,12 @@ rows AS (
            d.trip_hotel_id, 'SURROUNDING',
            -- section_type = <mã nhóm>_<tên nhóm theo đúng ngôn ngữ đó>
            -- ví dụ: '2_Giao thông' (vi)  /  '2_Transport' (en)
-           d.group_code || CASE WHEN COALESCE(d.group_name, '') <> ''
-                                THEN '_' || d.group_name ELSE '' END,
+           -- mã nhóm đệm 0 cho đủ 2 chữ số để sắp xếp theo chuỗi vẫn đúng
+           -- thứ tự ('02' < '03' < '04'), còn split_part(...,'_',1)::int
+           -- vẫn ra đúng số gốc của Trip.com.
+           lpad(d.group_code::text, 2, '0')
+             || CASE WHEN COALESCE(d.group_name, '') <> ''
+                     THEN '_' || d.group_name ELSE '' END,
            d.locale::text,
            y.field, y.value, 3, COALESCE(d.sort_order, 0) * 10 + y.sub
     FROM dia_diem d

@@ -139,7 +139,7 @@ def run(argv: list[str], label: str, ok_codes=(0,)) -> tuple[int, list[str]]:
 
 def crawl(ids_file: Path, locale: str, currency: str, checkin: str | None, checkout: str | None,
           workers: int, list_file: Path | None, fast: bool = False,
-          enrich_rooms: bool = False) -> str | None:
+          enrich_rooms: bool = False, chi_dump: bool = False) -> str | None:
     source = ["--file", str(list_file)] if list_file else ["--from-db"]
     # checkin=None: không ép ngày — crawl_detail tự dùng lại ngày ở của bản thứ
     # tiếng kia cho TỪNG hotel (nếu ngày đó còn ở tương lai), để ghép gói giá.
@@ -152,7 +152,9 @@ def crawl(ids_file: Path, locale: str, currency: str, checkin: str | None, check
         argv = ["src/crawl_fast.py", "--ids-file", str(ids_file.relative_to(ROOT)),
                 "--locale", locale, "--currency", currency, "--into-raw",
                 "--concurrency", str(min(workers, 4)), *dates]
-        if enrich_rooms:
+        if chi_dump:
+            argv.append("--chi-dump")
+        elif enrich_rooms:
             argv.append("--enrich-apis")
         _, log = run(argv, f"crawl_fast {locale}", ok_codes=(0, 1, 2))
     else:
@@ -172,6 +174,19 @@ def load(ids_file: Path, locale: str, validate_only: bool) -> bool:
 
 # ---------------------------------------------------------------- chương trình chính
 def main(args) -> None:
+    # --ids-file gộp vào args.ids: Windows giới hạn ~8000 ký tự cho một dòng
+    # lệnh, hơn nghìn id là vượt ngay.
+    if getattr(args, "ids_file", None):
+        duong_dan = Path(args.ids_file)
+        if not duong_dan.is_absolute() and not duong_dan.exists():
+            duong_dan = ROOT / duong_dan
+        if not duong_dan.exists():
+            raise SystemExit(f"Không tìm thấy file id: {args.ids_file}")
+        tu_file = [d.strip() for d in duong_dan.read_text(encoding="utf-8").splitlines()
+                   if d.strip() and not d.strip().startswith("#")]
+        args.ids = list(dict.fromkeys((args.ids or []) + tu_file))
+        print(f"--ids-file: đọc {len(tu_file)} id từ {duong_dan.name}")
+
     checkin = args.checkin or default_stay()[0]
     checkout = args.checkout or (datetime.fromisoformat(checkin) + timedelta(days=1)).date().isoformat()
     list_file = None
@@ -223,7 +238,8 @@ def main(args) -> None:
             stop = None
             for locale, currency in markets:
                 stop = crawl(ids_file, locale, currency, crawl_in, crawl_out, args.workers,
-                         list_file, fast=args.fast, enrich_rooms=args.enrich_rooms)
+                         list_file, fast=args.fast, enrich_rooms=args.enrich_rooms,
+                         chi_dump=args.chi_dump)
                 if stop:
                     break
             # Kể cả khi phải dừng, vẫn kiểm tra + nạp phần đã cào được.
@@ -246,6 +262,9 @@ def main(args) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ids", nargs="+", help="chỉ các hotel này (thay cho đọc DB)")
+    ap.add_argument("--ids-file",
+                    help="file danh sách trip_hotel_id, mỗi dòng một id (bỏ dòng trống và "
+                         "dòng bắt đầu bằng #). Dùng khi danh sách quá dài cho dòng lệnh.")
     ap.add_argument("--city-id", type=int, help="chỉ một thành phố trong DB cũ, vd 1356 (Đà Nẵng)")
     ap.add_argument("--list-file", help="file danh sách của crawl_api.py (output/data/api_hotels_*.json)")
     ap.add_argument("--lot-size", type=int, default=50, help="số hotel mỗi lô (mặc định 50)")
@@ -264,8 +283,14 @@ if __name__ == "__main__":
     ap.add_argument("--enrich-rooms", action="store_true",
                     help="với --fast: gọi API template để bù giá/offers; "
                          "không bật thì chỉ cào SSR tĩnh")
+    ap.add_argument("--chi-dump", action="store_true",
+                    help="với --fast: chỉ lấy những gì file dump cần (mô tả, chính sách, "
+                         "địa điểm lân cận). Bỏ API phòng/giá/album — bớt ~60%% request "
+                         "tới Trip.com. Dùng khi chỉ cần dữ liệu cho anh mentor.")
     ap.add_argument("--plan", action="store_true", help="chỉ in kế hoạch")
     parsed = ap.parse_args()
     if parsed.enrich_rooms and not parsed.fast:
         ap.error("--enrich-rooms chỉ dùng cùng --fast")
+    if parsed.chi_dump and not parsed.fast:
+        ap.error("--chi-dump chỉ dùng cùng --fast")
     main(parsed)

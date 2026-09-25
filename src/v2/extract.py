@@ -274,6 +274,28 @@ def first_int(text: Any) -> int | None:
 ROOM_COUNT_LABEL = re.compile(r"(s\u1ed1\s*ph\u00f2ng|number\s+of\s+rooms|rooms?)\s*[:\uff1a]\s*(\d+)", re.I)
 
 
+# Trip.com để mô tả ở HAI chỗ và chúng KHÔNG bằng nhau:
+#   hotelDescriptionInfo.description  → thường chỉ đoạn mở đầu (~200 ký tự)
+#   hotelDescriptionInfo.sectionList  → đầy đủ, mỗi phần tử một đoạn
+# Trước đây lấy .description trước nên mất phần lớn nội dung. Giờ lấy bản DÀI
+# HƠN, và khử đoạn trùng vì có khách sạn Trip.com trả lặp (744865 bản EN).
+def gop_mo_ta(desc_info: dict) -> str:
+    """Ghép mô tả đầy đủ nhất từ hotelDescriptionInfo."""
+    cac_doan = [str(x.get("desc") or "").strip()
+                for x in (desc_info.get("sectionList") or []) if isinstance(x, dict)]
+    day_du = "\n".join(d for d in cac_doan if d)
+    ngan = str(desc_info.get("description") or "").strip()
+    tho = day_du if len(day_du) >= len(ngan) else ngan
+    da_co, sach = set(), []
+    for dong in tho.split("\n"):
+        key = dong.strip()
+        if not key or key in da_co:
+            continue
+        da_co.add(key)
+        sach.append(key)
+    return "\n".join(sach)
+
+
 def room_count_from_labels(labels: Any) -> int | None:
     """hotelDescriptionInfo.lables → số phòng.
 
@@ -461,8 +483,7 @@ def extract_detail(b: Bundle, detail: dict, c: Cleaner, issues: Issues) -> None:
     if local and local == c.text(name_info.get("name")):
         local = None     # tên địa phương trùng tên hiển thị → không lưu lặp
     desc_info = detail.get("hotelDescriptionInfo") or {}
-    description = c.text(desc_info.get("description")) or c.text(
-        "\n\n".join(s.get("desc") or "" for s in desc_info.get("sectionList") or []))
+    description = c.text(gop_mo_ta(desc_info))
     b.detail_text = {  # dùng lại ở extract_hotel_i18n
         "name": c.text(name_info.get("name")), "local_name": local,
         "address": c.text(position.get("address")), "zone_name": c.text(position.get("zoneName")),

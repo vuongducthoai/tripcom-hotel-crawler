@@ -295,10 +295,40 @@ def headers_for(locale: str) -> dict:
     }
 
 
+def dem_phan_dump(dump: dict, n: dict) -> tuple[int, int, int]:
+    """Đếm 3 phần mà file dump cần: mô tả (ký tự), chính sách (mục), lân cận (địa điểm).
+
+    Chính sách nằm trong khối SSR hotelPolicyInfo chứ không nằm ở normalized,
+    nên phải đếm thẳng từ đó.
+    """
+    detail, gan = None, None
+    for goi in (dump.get("responses") or []):
+        url = str(goi.get("url") or "")
+        if url == DETAIL_BLOCK_URL:
+            detail = goi.get("response")
+        elif "ctGetNearbyPlaceInfo" in url:
+            gan = goi.get("response")
+
+    policy = ((detail or {}).get("hotelPolicyInfo")) or {}
+    so_muc = sum(1 for v in policy.values()
+                 if isinstance(v, dict) and v.get("title") and v.get("content"))
+
+    # Đếm thẳng từ ctGetNearbyPlaceInfo (placeInfoList[].places[]). Trường
+    # normalized["nearby_places"] do detail_extract dựng chỉ hiểu cấu trúc
+    # aroundItemList của getDetailAdditionalInfo — API mà --chi-dump bỏ qua —
+    # nên ở chế độ này nó luôn bằng 0 dù dữ liệu vẫn đủ.
+    nhom = ((gan or {}).get("data") or gan or {}).get("placeInfoList") or []
+    so_lan_can = sum(len(g.get("places") or []) for g in nhom if isinstance(g, dict))
+    if not so_lan_can:
+        so_lan_can = len(n.get("nearby_places") or [])
+    return len(n.get("description") or ""), so_muc, so_lan_can
+
+
 def fetch_one(client, hotel_id: str, locale: str, currency: str,
               checkin: str, checkout: str, save_html: bool = False,
               mau: dict | None = None,
-              visitor_id: str | None = None) -> tuple[dict, str | None]:
+              visitor_id: str | None = None,
+              chi_dump: bool = False) -> tuple[dict, str | None]:
     """Trả về (dump raw, lý do bị chặn nếu có)."""
     url = detail_url(hotel_id, locale, currency, checkin, checkout)
     response = client.get(url, headers=headers_for(locale), follow_redirects=True)
@@ -319,7 +349,10 @@ def fetch_one(client, hotel_id: str, locale: str, currency: str,
         detail = next((p["response"] for p in packets
                        if p["url"] == DETAIL_BLOCK_URL), None)
         ctx = fast_api.context_from_detail(detail)
-        for ten_api in sorted(mau.get("apis") or {}):
+        can_goi = sorted(mau.get("apis") or {})
+        if chi_dump:
+            can_goi = [t for t in can_goi if t == "ctGetNearbyPlaceInfo"]
+        for ten_api in can_goi:
             try:
                 api_url, api_headers, body = fast_api.payload_for(
                     mau, ten_api, hotel_id, checkin, checkout, ctx,
@@ -385,13 +418,21 @@ def save(dump: dict, hotel_id: str, locale: str, currency: str,
     return raw_store.write(folder / name, dump), False
 
 
-def _dump_quality(dump: dict) -> tuple[int, int, int, int]:
-    """Xếp raw theo: thành công, có API phòng, có offer, số packet."""
+def _dump_quality(dump: dict) -> tuple[int, int, int, int, int]:
+    """Xếp raw theo: thành công → CÓ KHỐI DETAIL → API phòng → offer → số packet.
+
+    Khối `embedded:hotel-detail-response` đứng ngay sau "thành công" vì nó chứa
+    mô tả, chính sách, sao, toạ độ — thiếu nó thì raw coi như rỗng ruột dù có
+    bao nhiêu packet đi nữa. Raw đời cũ của bản Chromium hay có 20–30 packet
+    API mà lại KHÔNG có khối này; so theo số packet thì chúng thắng oan và
+    chặn mất raw mới đầy đủ hơn.
+    """
     normalized = dump.get("normalized") or {}
     responses = dump.get("responses") or []
     if not normalized.get("success") or any(
             api_blocked(packet.get("response")) for packet in responses):
-        return (0, 0, 0, 0)
+        return (0, 0, 0, 0, 0)
+    co_detail = any(packet.get("url") == DETAIL_BLOCK_URL for packet in responses)
     room_packets = [packet for packet in responses
                     if "getHotelRoomListOversea" in str(packet.get("url") or "")]
     has_offers = False
@@ -401,15 +442,15 @@ def _dump_quality(dump: dict) -> tuple[int, int, int, int]:
         if data.get("saleRoomMap"):
             has_offers = True
             break
-    return (1, int(bool(room_packets)), int(has_offers), len(responses))
+    return (1, int(co_detail), int(bool(room_packets)), int(has_offers), len(responses))
 
 
-def _raw_quality(path: Path) -> tuple[int, int, int, int]:
+def _raw_quality(path: Path) -> tuple[int, int, int, int, int]:
     """Chất lượng raw đang có; raw API không bị SSR tĩnh ghi đè."""
     try:
         return _dump_quality(raw_store.read(path))
     except Exception:
-        return (0, 0, 0, 0)
+        return (0, 0, 0, 0, 0)
 
 
 # ---------------------------------------------------------------------- main
@@ -442,10 +483,16 @@ def main(args) -> int:
             print("   -", a)
         return 0
 
+    if args.chi_dump:
+        args.enrich_apis = True          # vẫn cần gọi ctGetNearbyPlaceInfo
     mau = fast_api.load_templates(args.locale, args.currency) if args.enrich_apis else None
     if args.enrich_apis and mau:
-        print(f"Dùng mẫu API của khách sạn {mau['hotel_id']} "
-              f"({len(mau.get('apis') or {})} API)")
+        if args.chi_dump:
+            print("Chế độ CHỈ DUMP: 1 lượt tải trang + 1 API ctGetNearbyPlaceInfo "
+                  "(bỏ phòng/giá/album)")
+        else:
+            print(f"Dùng mẫu API của khách sạn {mau['hotel_id']} "
+                  f"({len(mau.get('apis') or {})} API)")
     elif args.enrich_apis:
         raise SystemExit("Chưa có mẫu API. Tạo bằng --build-templates <HOTEL_ID>.")
     else:
@@ -479,7 +526,8 @@ def main(args) -> int:
         try:
             dump, reason = fetch_one(client, hotel_id, args.locale, args.currency,
                                      checkin, checkout, save_html=args.save_html, mau=mau,
-                                     visitor_id=cookies.get("UBT_VID"))
+                                     visitor_id=cookies.get("UBT_VID"),
+                                     chi_dump=args.chi_dump)
         except Exception as exc:
             with khoa:
                 dem["hong"] += 1
@@ -499,9 +547,14 @@ def main(args) -> int:
                 print(f"  [{index}/{len(ids)}] {hotel_id} BỎ QUA | raw cũ đầy đủ hơn")
             elif n.get("success"):
                 dem["xong"] += 1
-                print(f"  [{index}/{len(ids)}] {hotel_id} OK | ảnh={len(n.get('images') or [])}, "
-                      f"tiện ích={len(n.get('amenities') or [])}, "
-                      f"phòng={len(n.get('rooms') or [])} → {path.name}")
+                if args.chi_dump:
+                    mo_ta, so_policy, so_lan_can = dem_phan_dump(dump, n)
+                    print(f"  [{index}/{len(ids)}] {hotel_id} OK | mô tả={mo_ta} ký tự, "
+                          f"chính sách={so_policy}, lân cận={so_lan_can} → {path.name}")
+                else:
+                    print(f"  [{index}/{len(ids)}] {hotel_id} OK | ảnh={len(n.get('images') or [])}, "
+                          f"tiện ích={len(n.get('amenities') or [])}, "
+                          f"phòng={len(n.get('rooms') or [])} → {path.name}")
             else:
                 dem["hong"] += 1
                 print(f"  [{index}/{len(ids)}] {hotel_id} THIẾU | {n.get('error')}")
@@ -568,6 +621,10 @@ if __name__ == "__main__":
     ap.add_argument("--build-templates", metavar="HOTEL_ID",
                     help="dựng mẫu API từ raw của khách sạn này (raw phải do "
                          "crawl_detail.py cào, có kèm request)")
+    ap.add_argument("--chi-dump", action="store_true",
+                    help="chỉ lấy những gì file dump cần (mô tả, chính sách, địa điểm "
+                         "lân cận): 1 lượt tải trang + 1 API ctGetNearbyPlaceInfo. "
+                         "Bỏ qua API phòng/giá/album — bớt ~60%% request.")
     ap.add_argument("--enrich-apis", action="store_true",
                     help="gọi lại API trong template để lấy giá/offers/nearby; "
                          "mặc định chỉ cào SSR tĩnh")
