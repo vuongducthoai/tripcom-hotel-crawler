@@ -377,10 +377,11 @@ def parse_hotel_html(
                     "response": {"data": review_payload},
                 })
 
-        # Bridge nearby places from placeInfo to ctGetNearbyPlaceInfo SOA2 packet
+        # Bridge nearby places from placeInfo to ctGetNearbyPlaceInfo SOA2 packet if not already provided
+        has_real_nearby = any("ctGetNearbyPlaceInfo" in str(p.get("url") or "") for p in (additional_packets or []))
         pos_info = detail_block.get("hotelPositionInfo") if isinstance(detail_block, dict) else None
         place_info = (pos_info.get("placeInfo") if isinstance(pos_info, dict) else None) or detail_block.get("placeInfo")
-        if isinstance(place_info, dict):
+        if not has_real_nearby and isinstance(place_info, dict):
             pois = place_info.get("wholePoiInfoList") or place_info.get("poiList") or []
             if pois:
                 places = []

@@ -575,6 +575,7 @@ async def crawl_one_fast(
     locale: str,
     currency: str,
     include_rooms: bool = False,
+    no_nearby_ajax: bool = False,
 ) -> dict:
     from crawl_detail import market_raw_dir
     from ssr_extractor import parse_hotel_html
@@ -610,12 +611,73 @@ async def crawl_one_fast(
         )
         return fail_row
 
+    additional_packets = []
+    nearby_source = "ssr_fallback"
+    block = detail_block(html)
+    if not no_nearby_ajax and block and hasattr(client, "get_nearby_places"):
+        base = block.get("hotelBaseInfo") or {}
+        pos = block.get("hotelPositionInfo") or {}
+        lat = pos.get("lat") or base.get("lat")
+        lng = pos.get("lng") or base.get("lng")
+        city_id = base.get("cityId")
+        province_id = base.get("provinceId")
+
+        nearby_data, _ = await client.get_nearby_places(
+            hotel_id=hotel_id,
+            city_id=city_id,
+            province_id=province_id,
+            lat=lat,
+            lng=lng,
+            locale=locale,
+            currency=currency,
+            referer=url,
+        )
+        if nearby_data and isinstance(nearby_data, dict):
+            d = nearby_data.get("data") if isinstance(nearby_data.get("data"), dict) else nearby_data
+            if "aroundItemList" not in d and "placeInfoList" in d:
+                around = []
+                for g in d.get("placeInfoList") or []:
+                    if not isinstance(g, dict):
+                        continue
+                    pois = []
+                    for p in g.get("places") or []:
+                        if not isinstance(p, dict):
+                            continue
+                        pois.append({
+                            "id": p.get("id"),
+                            "name": p.get("name"),
+                            "distance": p.get("distance"),
+                            "distanceDescText": p.get("distanceDesc"),
+                            "sinkDistanceText": p.get("sinkDistanceText") or p.get("distanceDesc"),
+                            "arrivalType": p.get("arrivalType"),
+                            "poiType": p.get("poiType"),
+                            "lat": p.get("lat"),
+                            "lng": p.get("lng"),
+                            "tagNames": p.get("tagNames") or [],
+                        })
+                    around.append({
+                        "id": str(g.get("id") or "1"),
+                        "typeName": g.get("name") or "Lân cận",
+                        "poiInfoList": pois,
+                    })
+                d["aroundItemList"] = around
+
+            host = "www.trip.com" if locale.lower().startswith("en") else "vn.trip.com"
+            additional_packets.append({
+                "url": f"https://{host}/restapi/soa2/28820/ctGetNearbyPlaceInfo",
+                "method": "POST",
+                "status": 200,
+                "response": nearby_data,
+            })
+            nearby_source = "ajax"
+
     parsed = parse_hotel_html(
         html_text=html,
         hotel_id=hotel_id,
         url=url,
         currency=currency,
         locale=locale,
+        additional_packets=additional_packets,
     )
     normalized = parsed["normalized"]
     packets = parsed.get("packets") or []
@@ -626,6 +688,7 @@ async def crawl_one_fast(
     normalized["crawled_at"] = datetime.now().isoformat(timespec="seconds")
     normalized["success"] = bool(normalized.get("name") or normalized.get("images") or normalized.get("amenities"))
     normalized["rooms_missing"] = not bool(normalized.get("rooms"))
+    normalized["nearby_source"] = nearby_source
 
     folder = market_raw_dir(locale, currency)
     folder.mkdir(parents=True, exist_ok=True)
@@ -778,6 +841,7 @@ async def run_curl_async(args) -> int:
                 locale=locale,
                 currency=currency,
                 include_rooms=getattr(args, "include_rooms", False),
+                no_nearby_ajax=getattr(args, "no_nearby_ajax", False),
             )
 
             detail_slots[index - 1] = row
@@ -796,10 +860,11 @@ async def run_curl_async(args) -> int:
             room_c = len(row.get("rooms") or [])
             pol_c = len(row.get("policies") or [])
             place_c = len(row.get("nearby_places") or [])
+            source_tag = "AJAX" if row.get("nearby_source") == "ajax" else "SSR"
 
             print(
                 f"[{index}/{len(targets)}] {target['trip_hotel_id']} {status} | "
-                f"ảnh={img_c}, tiện ích={amen_c}, phòng={room_c}, chính sách={pol_c}, lân cận={place_c} ({sec}s)"
+                f"ảnh={img_c}, tiện ích={amen_c}, phòng={room_c}, chính sách={pol_c}, lân cận={place_c} ({source_tag}) ({sec}s)"
             )
 
             if crawled_count % config.CHECKPOINT_EVERY == 0:
@@ -1038,6 +1103,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-resume", action="store_true", help="Cào lại từ đầu, bỏ qua cache raw")
     ap.add_argument("--apply-db", action="store_true", help="Tự động nạp vào DB sau khi cào xong")
     ap.add_argument("--include-rooms", action="store_true", help="Thu thập thêm phòng nếu có")
+    ap.add_argument("--no-nearby-ajax", action="store_true", help="Không gọi thêm AJAX ctGetNearbyPlaceInfo, chỉ dùng 10 địa điểm từ SSR")
     ap.add_argument("--max-consecutive-errors", type=int, default=5, help="Số lỗi liên tiếp tối đa trước khi dừng")
     ap.add_argument("--require-detail-block", action="store_true", help="Coi raw chưa có khối hotelDetailResponse là chưa cào")
     ap.add_argument("--build-templates", metavar="HOTEL_ID", help="Dựng mẫu API từ raw của khách sạn này")
